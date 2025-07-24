@@ -520,10 +520,21 @@ class spectra_2d:
             if noise == True and NDIT != None:
 
                 N=NDIT
+                if N > 50: 
+                    print ("WARNING: TOO many exposures (>50) may crush the kernel")
 
                 #add noise
 
                 #Photon noise: lambda=photon counts for each pxiel
+                if np.isnan(focal_plane).any() == True:
+                    print ('WARNING: The inital 2D spectrum contains nan values. They will be simply masked for generation of photon noise distribution later on. ')
+                    focal_plane[np.isnan(focal_plane)]=1e-10
+                
+                if np.array(focal_plane<0).any() == True:
+                    print ('WARNING: The inital 2D spectrum contains negative values. They will be simply scaled to +1e-10 for generation of photon noise distribution later on. ')
+                    focal_plane[focal_plane<0]=1e-10
+
+
                 Photon_series=np.array([np.random.poisson(lam=focal_plane) for _ in range(N)])
 
                 #Ron and Dark
@@ -532,7 +543,7 @@ class spectra_2d:
 
                 signal_tot[n_order]=np.add(Photon_series, Dark_series, Readout_series)
 
-                signal_stack[n_order]=np.mean(signal_tot[n_order], axis=0)
+                #signal_stack[n_order]=np.mean(signal_tot[n_order], axis=0)
 
             elif noise == False and NDIT != None:
 
@@ -590,7 +601,10 @@ class spectra_2d:
 
             plt.close()
 
-        return (signal_tot, signal_stack, fig)
+            return (signal_tot, fig)
+        
+        else: 
+            return (signal_tot)
 
 
 #-----------------------------------------

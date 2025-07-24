@@ -396,12 +396,21 @@ class planet_para:
             wave = self.data_planet[0]
             flux = self.data_planet[1]
 
-            mask=np.array((wave>band[0])&(wave<band[1]))
+            mask=np.array((wave>band.min())&(wave<band.max()))
+
+            print ('wavelength range:', wave[mask].min(), wave[mask].max())
 
             data_cut=np.array([wave[mask],flux[mask]])
-            transmission=np.interp(data_cut[0], transmission[0], transmission[1])
+            if transmission is None:
 
-            int_flux= np.trapz(data_cut[1]*transmission, data_cut[0])/np.trapz(transmission, data_cut[0])
+                transmission=np.ones_like(data_cut[0])
+                
+                int_flux =np.trapz(data_cut[1], data_cut[0])
+            
+            else:
+                transmission=np.interp(data_cut[0], transmission[0], transmission[1])
+
+                int_flux= np.trapz(data_cut[1]*transmission, data_cut[0])/np.trapz(transmission, data_cut[0])
 
 
 
@@ -427,8 +436,11 @@ class planet_para:
 
         dist_ratio=(radius/distance)        
             
-        F_rec=(solid_angle/(4*np.pi))*np.square(dist_ratio)*int_flux
+        F_rec=(solid_angle/(4*np.pi))*np.square(dist_ratio)*(int_flux)
+
+
         
+        #mag=-2.5*np.log10(F_rec/zero)
         mag=-2.5*np.log10(F_rec/zero)
         
         if extinction_mag_disk == True:
