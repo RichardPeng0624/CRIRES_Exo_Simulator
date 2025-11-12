@@ -38,8 +38,8 @@ class spectra_2d:
 
         '''
 
-        if target not in ['star', 'planet']:
-            print ('Target not valid, please choose one from "star" or "planet" ') #The target can only be either star or planet
+        if target not in ['star', 'planet', 'disk']:
+            print ('Target not valid, please choose one from "star" or "planet" or "disk" ') #The target can only be either star or planet
 
         self.target = target #set up the target
         self.path_etc_local=path_etc_local #the local path of the etc script linked to website service
@@ -391,15 +391,18 @@ class spectra_2d:
 
     #------------------
 
-    def combine(self, data_star, data_p, \
+    def combine(self, data_star, data_p,\
+                data_disk=None, disk_structure=None, disk_separation=None, \
                 plot_combination=None, d=None, star_posi=None, sky='Uniform', noise=True, data_sky=None,\
                 ron=None, dark=None, NDIT=None, plane=None, ceil_percentage=None,\
-                 plot_save_path=None):
+                plot_save_path=None):
 
         '''
         This function works for combining all signals together in one plot to to simulate the observation.
 
-        # data_star, data_p: the dataset of the whole focal plane for star and planet
+        # data_star, data_p, data_disk: the dataset of the whole focal plane for star, planet and disk
+        # disk structure: ['two-side ring', 'one-side ring', 'veiling'] to determine the disk contribution along the spatial axis
+        # disk separation: in pixel. Used to determine the disk contribution along the spatial axis
         # plot_combination: if plot the combination signal map or not. The default is not plotting
         # d: The projected separation between the planet and the star
         # star_posi: The position of the star on the spatial axis of the detector plane (could be used for nodding mode). The default position is the center of the spatial axis.
@@ -482,6 +485,27 @@ class spectra_2d:
             print(one_order_s['dat_diff_0'][0:10])
             focal_plane[central_pix+d, 0:len(one_order_p)]=one_order_p['dat_diff_0']
             print(one_order_p['dat_diff_0'][0:10])
+            
+            if data_disk != None:
+                one_order_ds=data_disk.loc[(data_disk['wavelength(nm)']<=order_w[n_order][1])&(data_disk['wavelength(nm)']>=order_w[n_order][0])]
+
+                if disk_structure == 'two-side ring':
+                    focal_plane[central_pix+disk_separation[0], 0:len(one_order_ds)]=one_order_ds['dat_diff_0']
+                    focal_plane[central_pix+disk_separation[1], 0:len(one_order_ds)]=one_order_ds['dat_diff_0']
+                
+                if disk_structure =='one-side ring':
+                    focal_plane[central_pix+disk_separation, 0:len(one_order_ds)]=one_order_ds['dat_diff_0']
+                
+                if disk_structure =='veiling':
+
+                    print ('Please add the veiling factor into the injected planet spectrum, or add an extinction value when generate the planetary signal.')
+
+                    data_disk == None 
+
+                    
+
+                else:
+                    print ("Please select the disk structure keywords supported by the pipeline: 'one-side' or 'two-side' ")
 
 
             #if sky == True:
@@ -507,6 +531,29 @@ class spectra_2d:
                     loc_be_p=central_pix+d-z
                     focal_plane[loc_up_p,0:len(one_order_p)]+=one_order_p['dat_diff_%s'%z]
                     focal_plane[loc_be_p,0:len(one_order_p)]+=one_order_p['dat_diff_%s'%z]
+
+                #add disk signal
+                if disk_structure == 'one-side ring':
+                    if disk_separation+z <= pixel_posi:
+                        loc_up_ds=central_pix+disk_separation+z
+                        loc_be_ds=central_pix+disk_separation-z
+                        focal_plane[loc_up_ds,0:len(one_order_ds)]+=one_order_ds['dat_diff_%s'%z]
+                        focal_plane[loc_be_ds,0:len(one_order_ds)]+=one_order_ds['dat_diff_%s'%z]   
+
+                elif disk_structure =='two-side ring':  
+                    #Inner disk               
+                    if disk_separation[0]+z <= pixel_posi:
+                        loc_up_ds=central_pix+disk_separation[0]+z
+                        loc_be_ds=central_pix+disk_separation[0]-z
+                        focal_plane[loc_up_ds,0:len(one_order_ds)]+=one_order_ds['dat_diff_%s'%z]
+                        focal_plane[loc_be_ds,0:len(one_order_ds)]+=one_order_ds['dat_diff_%s'%z]
+                    #Outer disk
+                    if disk_separation[1]+z <= pixel_posi:
+                        loc_up_ds=central_pix+disk_separation[1]+z
+                        loc_be_ds=central_pix+disk_separation[1]-z
+                        focal_plane[loc_up_ds,0:len(one_order_ds)]+=one_order_ds['dat_diff_%s'%z]
+                        focal_plane[loc_be_ds,0:len(one_order_ds)]+=one_order_ds['dat_diff_%s'%z]
+
 
             #Add sky background
             #Uniform sky: Generalize the sky background to all pixels
@@ -539,7 +586,9 @@ class spectra_2d:
 
                 #Ron and Dark
                 Dark_series=np.array([np.random.poisson(lam=dark, size=focal_plane.shape) for _ in range(N)])
-                Readout_series=np.array([np.random.poisson(lam=ron, size=focal_plane.shape) for _ in range(N)])
+                #Readout_series=np.array([np.random.poisson(lam=ron, size=focal_plane.shape) for _ in range(N)])
+                #Using Gaussian distribution to simulate read-out-noise
+                Readout_series=np.array([np.random.normal(loc=0.0, scale=ron, size=focal_plane.shape) for _ in range(N)])
 
                 signal_tot[n_order]=np.add(Photon_series, Dark_series, Readout_series)
 

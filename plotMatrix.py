@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors
 
-def plotMatrix(mat, xvec, yvec, xlab='', ylab='', stretch=False, planet_posi=None, scale='linear', power=2):
+def plotMatrix(mat, xvec, yvec, xlab='', ylab='', stretch=False, planet_posi=None, scale='linear', power=2, thresh=1, scale_log=1):
     """
     Plots a 2D spectra with given x and y vectors, with options for stretching, scaling, and marking a planet position.
 
@@ -16,6 +16,8 @@ def plotMatrix(mat, xvec, yvec, xlab='', ylab='', stretch=False, planet_posi=Non
     planet_posi (float or None): Position of the planet to be marked with a horizontal line. Default is None.
     scale (str): Scale of the color map, either 'linear' or 'log'. Default is 'linear'.
     power (int): Power for the logarithmic scale. Default is 2.
+    thresh (float or None): Threshold for the logarithmic scale. Default is None.
+    scale (float or None): Scale for the logarithmic normalization. Default is None.
     """
     if stretch:
         vmin = np.nanmean(mat) - np.nanstd(mat) * 8
@@ -37,7 +39,7 @@ def plotMatrix(mat, xvec, yvec, xlab='', ylab='', stretch=False, planet_posi=Non
 
     elif scale == 'log':
         plt.figure(figsize=(12, 3))
-        Norm = matplotlib.colors.SymLogNorm(linthresh=1, linscale=1, vmin=vmin, vmax=vmax, base=10**power)
+        Norm = matplotlib.colors.SymLogNorm(linthresh=thresh, linscale=scale_log, vmin=vmin, vmax=vmax, base=10**power)
         plt.imshow(mat, origin='lower', aspect='auto', extent=ext, norm=Norm)
         
         if planet_posi is not None:

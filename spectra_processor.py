@@ -8,6 +8,8 @@ from scipy.stats import norm
 from scipy.optimize import curve_fit
 from scipy.linalg import svd, solve, det
 from scipy.signal import savgol_filter
+from scipy.optimize import curve_fit
+from scipy.stats import chi2, norm
 
 from exocrires import info
 from exocrires import plotMatrix 
@@ -308,7 +310,7 @@ class processor_cross_correlation():
         Returns:
             numpy.ndarray: A 3D array containing the CCF grid with dimensions (nOrder, nObs, ncc).
         """
-
+        
         nx = len(f)
         I = np.ones(nx)
         f -= np.dot(f,I)/nx
@@ -564,7 +566,7 @@ class processor_likelihood_map():
             
         return (log_likelihood)
 
-    def likelihood_map(self, observation_matrix, model_matrix, n_vgrids, sigma_matrix, prior, matrix_components=2, log_sigma=True):
+    def likelihood_map(self, observation_matrix, model_matrix, n_vgrids, sigma_matrix, prior, matrix_components=2, log_sigma=True, skip_velocity_grid_single_component=None):
         
         """
         Computes the log-likelihood map for a given observation matrix and model matrix.
@@ -585,6 +587,8 @@ class processor_likelihood_map():
             The number of components in the model matrix (default is 2). Must be either 1 or 2.
         log_sigma : bool, optional
             If True, the logarithm of the variance is used in the likelihood calculation (default is True).
+        skip_velocity_grid_single_component : list, optional
+            A list of velocity grid indices to skip when matrix_components is 1.
         Returns:
         -------
         numpy.ndarray
@@ -606,36 +610,125 @@ class processor_likelihood_map():
         map_size=(observation_matrix.shape[0], n_vgrids)
         log_likelihood_mapp=np.zeros(shape=map_size)
 
-        for v in tqdm.tqdm(range (model_matrix.shape[0])):
-        
-            for i in range(observation_matrix.shape[0]):
-        
-                variance_flat=sigma_matrix[i].flatten()
-        
-                print (variance_flat.shape)
-        
-                mask_finite=np.isfinite(observation_matrix[i])
-                mask_finite_var=np.isfinite(variance_flat)
-        
-        
-                if matrix_components == 1:
-                    fit_model_mask=np.array([model_matrix[v][i][mask_finite&mask_finite_var]])
-                elif matrix_components == 2:
-                    fit_model_mask=np.array([model_matrix[v][0,i][mask_finite&mask_finite_var], model_matrix[v][1, i][mask_finite&mask_finite_var]])
-                else:
-                    print ("The first axis of your model matrix refers to the number of components in your model. It is supposed to be either 1 or 2 in EXOCRIRES v1.0.")
-        
-                    continue
+        for i in range(observation_matrix.shape[0]):
+
+            variance_flat = sigma_matrix[i].flatten()
+            mask_finite = np.isfinite(observation_matrix[i])
+            mask_finite_var = np.isfinite(variance_flat)
+
+            if matrix_components == 1:
+                if skip_velocity_grid_single_component is not None:
+                    print(f"Skipping velocity grids as the stellar-only model is fixed.")
+                    fit_model_mask = np.array([model_matrix[0][i][mask_finite & mask_finite_var]])
                     
-                output=self.likelihood_calculator(d=observation_matrix[i][mask_finite&mask_finite_var], M=fit_model_mask.T, \
-                                                Sigma_0_flat=variance_flat[mask_finite_var&mask_finite], log_sigma_0=log_sigma, gamma=2, prior_psi=prior)
-        
-                
-                log_likelihood_mapp[i][v]=output
-        
-                fit_model_mask = None
-            
+                    output = self.likelihood_calculator(
+                                d=observation_matrix[i][mask_finite & mask_finite_var],
+                                M=fit_model_mask.T,
+                                Sigma_0_flat=variance_flat[mask_finite_var & mask_finite],
+                                log_sigma_0=log_sigma,
+                                gamma=matrix_components,
+                                prior_psi=prior
+                            )
+                    log_likelihood_mapp[i] = np.repeat(output, n_vgrids)
+
+                else:
+                    for v in tqdm.tqdm(range(model_matrix.shape[0])):
+                        fit_model_mask = np.array([model_matrix[v][i][mask_finite & mask_finite_var] for v in range(model_matrix.shape[0])])
+
+                        output = self.likelihood_calculator(
+                                    d=observation_matrix[i][mask_finite & mask_finite_var],
+                                    M=fit_model_mask.T,
+                                    Sigma_0_flat=variance_flat[mask_finite_var & mask_finite],
+                                    log_sigma_0=log_sigma,
+                                    gamma=matrix_components,
+                                    prior_psi=prior
+                                )
+                        log_likelihood_mapp[i][v] = output
+
+            elif matrix_components >= 2:
+
+                for v in tqdm.tqdm(range(model_matrix.shape[0])):
+                    
+                    print('The number of model components should be at least 1. The last component of your model should be the planet model.')
+                    fit_model_mask = np.array([model_matrix[v][comp, i][mask_finite & mask_finite_var] for comp in range(matrix_components)])
+
+
+                    output = self.likelihood_calculator(
+                    d=observation_matrix[i][mask_finite & mask_finite_var],
+                    M=fit_model_mask.T,
+                    Sigma_0_flat=variance_flat[mask_finite_var & mask_finite],
+                    log_sigma_0=log_sigma,
+                    gamma=matrix_components,
+                    prior_psi=prior
+                )
+                    log_likelihood_mapp[i][v] = output
+            else:
+                print("The first axis of your model matrix refers to the number of components in your model. It is supposed to be at least 1 in EXOCRIRES v1.0.")
+                continue
 
         return (log_likelihood_mapp)
-                
+    
+
+
+    def gaussian_delta_model(self, x, sigma_g, mu):
+        """Model for Delta lnL: Delta(x) = (x-mu)^2 / (2*sigma_g^2)"""
+        return (x - mu)**2 / (2.0 * sigma_g**2)
+
+    def ci_from_sigma(self, v, delta_lnL, target_sigma=1.0, constrain_CL=False):
+
+        """Interpolate to get left/right bounds where z <= target_sigma.
+        Returns (left, right)."""
+
+        # we want region where z <= target_sigma (i.e.  inside the conf. interval)
+    
+        if constrain_CL == True:
+
+            delta_lnL_ratio = delta_lnL-np.nanmax(delta_lnL) 
+
+            z= np.sqrt(-2*delta_lnL_ratio)
+
+
+            inside = (z <= target_sigma)
+            if not inside.any():
+                return None
+            imin = np.argmin(z)
+            # left side
+            z_left = z[:imin+1]; v_left = v[:imin+1]
+            if inside[0]:
+                left = v_left[0]
+            else:
+                idx = np.where((z_left[:-1] > target_sigma) & (z_left[1:] <= target_sigma))[0]
+                if idx.size == 0:
+                    left = v_left[0]
+                else:
+                    i = idx[-1]
+                    # linear interpolation of z vs v
+                    left = np.interp(target_sigma, z_left[i:i+2], v_left[i:i+2])
+            # right side
+            z_right = z[imin:]; v_right = v[imin:]
+            if inside[-1]:
+                right = v_right[-1]
+            else:
+                idx = np.where((z_right[:-1] <= target_sigma) & (z_right[1:] > target_sigma))[0]
+                if idx.size == 0:
+                    right = v_right[-1]
+                else:
+                    i = idx[0]
+                    right = np.interp(target_sigma, z_right[i:i+2], v_right[i:i+2])
+
+            
+        else:
+
+            z = np.sqrt(np.abs(-2 * delta_lnL)) 
+            left = 0.0
+            right = 0.0
+
+        return left, right, z
+
+
+        #estimate the confidence level from delta_lnL using the window [0:5], [-5:]
+        #sigma = (delta_lnL-np.nanmedian(delta_lnL))/np.nanstd(delta_lnL[0:5]+delta_lnL[-5:])
+        #sigma = np.sqrt(-2*delta_lnL_ratio)
+        #return left, right, z
+
 

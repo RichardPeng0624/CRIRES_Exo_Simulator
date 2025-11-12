@@ -30,5 +30,5 @@ def initialize_log(path):
 # Function to log a single simulation
 def log_simulation(data_dict):
     df = pd.DataFrame([data_dict])
-    df.to_csv(csv_file, mode='a', header=not os.path.exists(csv_file), index=False)
+    df.to_csv(csv_file, mode='a', header=not, os.path.exists(csv_file), index=False)
     print("Simulation logged.")
