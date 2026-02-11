@@ -320,6 +320,36 @@ class processor_cross_correlation():
         varg = np.dot(g,g)/nx
 
         return (R / np.sqrt(varf*varg))
+        #return (R/np.sqrt(varf))
+    
+    def test_xvar(self,f,g):
+
+        """
+        Compute the normalized cross-correlation between two arrays.
+        Args:
+            f (array-like): First input array.
+            g (array-like): Second input array.
+        Returns:
+            float: Normalized cross-correlation coefficient.
+        """
+        """
+        Compute the cross-correlation function (CCF) grid for a range of radial velocity lags.
+        Args:
+            rvlag (array-like): Array of radial velocity lags (in km/s).
+            ncc (int): Number of cross-correlation points.
+        Returns:
+            numpy.ndarray: A 3D array containing the CCF grid with dimensions (nOrder, nObs, ncc).
+        """
+        
+        nx = len(f)
+        I = np.ones(nx)
+        f -= np.dot(f,I)/nx
+        g -= np.dot(g,I)/nx
+        R = np.dot(f,g)/nx
+        varf = np.dot(f,f)/nx
+        varg = np.dot(g,g)/nx
+
+        return (R)
 
     def get_cc_grid(self, rvlag, ncc):
 

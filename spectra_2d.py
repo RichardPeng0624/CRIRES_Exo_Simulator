@@ -75,12 +75,16 @@ class spectra_2d:
         # star_template: If you want to use your own stellar template, please pass the path in the arugment here
         '''
 
+        '''
+        --last modified on 4th, Feburary, 2026 to be compatible with the new ETC v117.2.0--
+        '''
+
         with open(self.path_input, 'r') as f:
             data = json.load(f)
             # Modify the contents of the JSON file
             for i in self.aperture_list:
 
-                data['seeingiqao']['aperturepix']= float(i)
+                data['seeing']['aperturepix']= float(i)
 
                 # Update the modified JSON file to disk
                 with open(self.path_input_modi, 'w') as f:
