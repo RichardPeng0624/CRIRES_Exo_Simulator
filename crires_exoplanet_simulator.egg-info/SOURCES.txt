@@ -1,6 +1,0 @@
-setup.py
-crires_exoplanet_simulator.egg-info/PKG-INFO
-crires_exoplanet_simulator.egg-info/SOURCES.txt
-crires_exoplanet_simulator.egg-info/dependency_links.txt
-crires_exoplanet_simulator.egg-info/requires.txt
-crires_exoplanet_simulator.egg-info/top_level.txt

@@ -506,10 +506,12 @@ class processor_likelihood_map():
         pass
         
 
-    def covariance_calculator (self, Fit_Matrix, ABBA_series, N_exposures):
+    def covariance_calculator (self, Fit_Matrix, ABBA_series, N_exposures, scale_factor=None):
         
-        
-        fit_matrix_single=Fit_Matrix/N_exposures
+        if scale_factor == None:
+            fit_matrix_single=Fit_Matrix/N_exposures
+        else:
+            fit_matrix_single=Fit_Matrix*scale_factor
 
         fit_matrix_ex=np.expand_dims(fit_matrix_single, axis=1)
 
