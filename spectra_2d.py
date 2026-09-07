@@ -395,11 +395,84 @@ class spectra_2d:
 
     #------------------
 
+    def extend_psf_wing(self, wave_count_sort, n_total=None, separation=None, margin=5, fit_range=None, block_col=None):
+        '''
+        Extend the aperture-differenced spatial PSF profile outward with a POWER-LAW wing.
+
+        signal() builds the spatial PSF profile from the ETC apertures 1,3,...,(2m-1), giving
+        columns dat_diff_0 ... dat_diff_(m-1)  (m = len(self.aperture_list)), i.e. the realistic
+        AO+seeing PSF measured out to +/-(m-1) pixels (the star stays at the centre). When a
+        companion sits at a separation larger than (m-1) pixels its location is beyond the measured
+        stellar profile. Rather than running the ETC for ever-larger apertures (>2m-1; the website
+        jumps 21->35->55 and the intermediate data become overwhelming), we sample the measured
+        wing and extrapolate it as a power law  P(z) = P(z_meas) * (z / z_meas) ** slope, with slope
+        fit in log-log space from the outer measured pixels. Only the *wing* (z >= m) is synthesised;
+        the measured core is untouched and the star remains centred.
+
+        n_total    : total number of spatial points wanted. Default = separation + margin + 1, i.e.
+                     the stellar wing is filled out to +/-(separation+margin) pixels (a few pixels
+                     past the companion), as used star-centred by combine() / the ABBA extraction.
+        separation : companion separation in pixels (sets n_total when n_total is None).
+        margin     : extra pixels filled beyond the companion (default 5).
+        fit_range  : (z0, z1) measured-pixel range for the log-log fit (default: outer half).
+        Returns a copy of wave_count_sort with extra dat_diff_<z> columns (z = m ... n_total-1).
+        '''
+        df = wave_count_sort.copy()
+        m = len(self.aperture_list)                 # measured profile length (z = 0 ... m-1)
+        z_meas = m - 1                              # outermost measured pixel
+        if n_total is None:
+            sep = int(round(separation)) if separation is not None else 0
+            n_total = sep + int(margin) + 1         # fill out to +/-(sep+margin) pixels
+        if n_total <= m:
+            return df
+        if fit_range is None:
+            fit_range = (max(1, m // 2), z_meas)    # outer half of the measured profile
+        z0, z1 = int(fit_range[0]), int(fit_range[1])
+        zs = np.arange(z0, z1 + 1)
+        logz = np.log(zs)
+        wing = np.vstack([np.abs(df['dat_diff_%d' % z].astype(float).values) for z in zs])  # (nz, nrows)
+        wing = np.clip(wing, 1e-30, None)
+        anchor = df['dat_diff_%d' % z_meas].astype(float).values                            # per-channel amplitude
+
+        # Identify the (detector, order) block column: signal() concatenates one converted_data
+        # block per (detector, order), tagged by the pre-explode 'index' (few unique values).
+        if block_col is None:
+            cand = [c for c in df.columns
+                    if (not str(c).startswith('dat_diff_')) and ('wavelength' not in str(c))]
+            cand = [(df[c].nunique(), c) for c in cand]
+            cand = [(nu, c) for nu, c in cand if 1 < nu < len(df)]
+            block_col = min(cand)[1] if cand else None
+
+        new = {z: np.empty(len(df)) for z in range(m, n_total)}
+        slopes = {}
+        if block_col is not None:
+            # one power-law slope per (detector, order) block (different throughput per det/order)
+            for blk, pos in df.groupby(block_col).indices.items():
+                med = np.median(wing[:, pos], axis=1)
+                slopes[blk] = np.polyfit(logz, np.log(med), 1)[0]
+                for z in range(m, n_total):
+                    new[z][pos] = anchor[pos] * (float(z) / z_meas) ** slopes[blk]
+        else:
+            # fallback: a single global slope from the median wing
+            slopes['global'] = np.polyfit(logz, np.log(np.median(wing, axis=1)), 1)[0]
+            for z in range(m, n_total):
+                new[z][:] = anchor * (float(z) / z_meas) ** slopes['global']
+
+        for z in range(m, n_total):
+            df['dat_diff_%d' % z] = new[z]
+        self.psf_wing_slopes = slopes
+        sl = np.array(list(slopes.values()))
+        print('extend_psf_wing: z=0..%d -> 0..%d ; %d (det,order) power-law fits, slope %.2f..%.2f (median %.2f)'
+              % (z_meas, n_total - 1, len(slopes), sl.min(), sl.max(), np.median(sl)))
+        return df
+
+    #------------------
+
     def combine(self, data_star, data_p,\
                 data_disk=None, disk_structure=None, disk_separation=None, \
                 plot_combination=None, d=None, star_posi=None, sky='Uniform', noise=True, data_sky=None,\
                 ron=None, dark=None, NDIT=None, plane=None, ceil_percentage=None,\
-                plot_save_path=None):
+                plot_save_path=None, reduced_focal_plane=True, reduced_height=300):
 
         '''
         This function works for combining all signals together in one plot to to simulate the observation.
@@ -439,6 +512,15 @@ class spectra_2d:
 
         if plane != None:
             self.focal_plane = np.zeros(shape=plane)
+
+        if reduced_focal_plane:
+            # Compact spatial frame: a slit observation only fills the nod region (+/- the PSF
+            # wings); the rest of the 2048-row detector is empty sky. Simulating just `reduced_height`
+            # rows shrinks each per-nod cube ~7x in memory/disk with an identical ABBA extraction
+            # (the caller must place the nods within reduced_height, i.e. nod centre ~ reduced_height/2).
+            self.focal_plane = np.zeros(shape=(int(reduced_height), self.focal_plane.shape[1]))
+
+        plane = self.focal_plane.shape   # all per-order frames use the (possibly reduced) height
 
         if star_posi == None:
 
@@ -518,23 +600,33 @@ class spectra_2d:
             print("The center of planet's PSF profile is set at pixel %s"%(central_pix+d))
 
             #==Spread out following the PSF wings==
+            # number of spatial-profile points available per source. The stellar profile may have
+            # been power-law-extended (extend_psf_wing) so its wing reaches a wide-separation
+            # companion; the planet keeps its measured profile but is now placed at any separation.
+            n_star = sum(1 for c in data_star.columns if str(c).startswith('dat_diff_'))
+            n_planet = sum(1 for c in data_p.columns if str(c).startswith('dat_diff_'))
+            nrow = focal_plane.shape[0]
 
-            for z in range(1, pixel_posi):
+            for z in range(1, max(n_star, n_planet, pixel_posi)):
 
-                #add stellar signal
-                loc_up=central_pix+z
-                loc_be=central_pix-z
+                #add stellar signal (measured core + power-law-extrapolated wing)
+                if z < n_star:
+                    loc_up=central_pix+z
+                    loc_be=central_pix-z
+                    if 0 <= loc_up < nrow:
+                        focal_plane[loc_up,0:len(one_order_s)]+=one_order_s['dat_diff_%s'%z]
+                    if 0 <= loc_be < nrow:
+                        focal_plane[loc_be,0:len(one_order_s)]+=one_order_s['dat_diff_%s'%z]
 
-                focal_plane[loc_up,0:len(one_order_s)]+=one_order_s['dat_diff_%s'%z]
-                focal_plane[loc_be,0:len(one_order_s)]+=one_order_s['dat_diff_%s'%z]
 
-
-                #add planet signal
-                if d+z <= pixel_posi:
+                #add planet signal (centred on central_pix+d; valid for any separation d)
+                if z < n_planet:
                     loc_up_p=central_pix+d+z
                     loc_be_p=central_pix+d-z
-                    focal_plane[loc_up_p,0:len(one_order_p)]+=one_order_p['dat_diff_%s'%z]
-                    focal_plane[loc_be_p,0:len(one_order_p)]+=one_order_p['dat_diff_%s'%z]
+                    if 0 <= loc_up_p < nrow:
+                        focal_plane[loc_up_p,0:len(one_order_p)]+=one_order_p['dat_diff_%s'%z]
+                    if 0 <= loc_be_p < nrow:
+                        focal_plane[loc_be_p,0:len(one_order_p)]+=one_order_p['dat_diff_%s'%z]
 
                 #add disk signal
                 if disk_structure == 'one-side ring':
