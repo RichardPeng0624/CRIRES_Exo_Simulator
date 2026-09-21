@@ -686,7 +686,20 @@ class processor_likelihood_map():
         else:
             #print ('sum(np.log(sigma_0)):', np.sum(log_Sigma_0))
 
-            log_likelihood = np.log(prior_psi) - 0.5 * (np.sum(log_Sigma_0) - np.log(determinant)) \
+            # BUGFIX (2026-09-22): this branch must equal the log_sigma_0=False
+            # branch above (same quantity, numerically-stabler path): log(det(Sigma_0)
+            # * determinant) = sum(log_Sigma_0) + log(determinant), so both det terms
+            # are subtracted, matching Ruffio et al. (2019) eq. 15 / Landman et al.
+            # (2024) eq. 15 (both |Sigma_0| and |M^T Sigma_0^-1 M| are in the
+            # denominator). This line previously had "- np.log(determinant)" (a "+"
+            # after distributing -0.5), which flips the sign of that term relative to
+            # the other branch and the cited equation. Found and verified against
+            # Landman et al. (2024) on 2026-09-05; the fix was validated then to have
+            # a negligible effect on self-referenced (peak-relative) significance
+            # figures for the H1800 survey grid, but it does change raw/absolute
+            # log-likelihood and Bayes-factor values, since the determinant depends on
+            # the trial velocity / model design matrix.
+            log_likelihood = np.log(prior_psi) - 0.5 * (np.sum(log_Sigma_0) + np.log(determinant)) \
                         + ((Nd - Nc + gamma - 1) / 2) * np.log(1 / chi_0_squared)
 
             print('log likelihood:', log_likelihood)

@@ -26,10 +26,23 @@ an element-wise one::
 which brings the same map down to a few seconds (~250-600x measured).
 
 The log-likelihood evaluated is the ``log_sigma_0=True`` branch of the original,
-i.e. the marginalised likelihood of Ruffio et al. (2019) eq. 15::
+i.e. the marginalised likelihood of Ruffio et al. (2019) eq. 15 / Landman et al.
+(2024) eq. 15::
 
-    lnL = ln(prior) - 0.5 * (sum(log sigma^2) - ln det(M^T Sigma_0^-1 M))
+    lnL = ln(prior) - 0.5 * (sum(log sigma^2) + ln det(M^T Sigma_0^-1 M))
           + ((Nd - Nc + gamma - 1) / 2) * ln(1 / chi_0^2)
+
+BUGFIX (2026-09-22): the determinant term above was previously written with a
+"-" (i.e. the formula read "... - ln det(...)"), which flips its sign relative
+to both cited references and to this module's own ``log_sigma_0=False``-style
+derivation. Found and confirmed against Landman et al. (2024) on 2026-09-05,
+fixed here and in ``processor_likelihood_map.likelihood_calculator`` on
+2026-09-22. The determinant depends on the model design matrix (hence on the
+trial velocity), so this is not a constant offset in general; it was validated
+on 2026-09-05 to have a negligible effect on *self-referenced* (peak-relative)
+significance figures for one survey grid, but it does change raw/absolute
+log-likelihood values -- see ``exocrires.spectra_retriever`` for a case
+(un-normalised model amplitude) where the sign of this term matters directly.
 
 Agreement with the original
 ---------------------------
@@ -42,10 +55,16 @@ Verified against ``processor_likelihood_map.likelihood_calculator`` /
     * map, single component + ``skip_velocity_grid_single_component``
                                    max |difference| 4.5e-13
 
+These relative-agreement figures still hold after the 2026-09-22 sign fix
+(both implementations were changed identically, so they still match each
+other to the same precision). The specific reference number below, however,
+was measured *before* that fix and is now stale as an absolute value:
+
 End-to-end on the real H1800_10_1.51_6.6/0308 K2166 dataset (7 orders,
 Nd = 6144, 35 spatial rows, 20 velocity grids), the summed planet-vs-no-planet
-map agrees with the previously saved reference map to 7.3e-12 everywhere and
-reproduces dlnL = 1741.67 at the planet row for v = 10 km/s.
+map agreed with the previously saved reference map to 7.3e-12 everywhere and
+reproduced dlnL = 1741.67 at the planet row for v = 10 km/s -- pre-fix value,
+not re-verified post-fix.
 
 Deliberate differences from the original
 ----------------------------------------
@@ -172,8 +191,16 @@ def _log_likelihood_core(d, M, inv_var, log_det_sigma, prior_psi, gamma):
     Nd = d.shape[0]
     Nc = M.shape[1]
 
+    # BUGFIX (2026-09-22): was "- log_determinant" (i.e. "+0.5*log_determinant"
+    # after distributing -0.5), which flipped the sign of the |M^T Sigma_0^-1 M|
+    # term relative to Ruffio et al. (2019) eq. 15 / Landman et al. (2024) eq. 15 --
+    # both |Sigma_0| and |M^T Sigma_0^-1 M| belong in the denominator of L, i.e.
+    # both subtracted here. This mirrors the same fix applied to
+    # processor_likelihood_map.likelihood_calculator's log_sigma_0=True branch in
+    # spectra_processor.py; the two must agree since this module is a fast
+    # drop-in replacement for that one. See that file for the fix history.
     return (np.log(prior_psi)
-            - 0.5 * (log_det_sigma - log_determinant)
+            - 0.5 * (log_det_sigma + log_determinant)
             + ((Nd - Nc + gamma - 1) / 2) * np.log(1 / chi_0_squared))
 
 
