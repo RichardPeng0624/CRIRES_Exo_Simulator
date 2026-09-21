@@ -106,16 +106,27 @@ Two consequences of the EXOCRIRES likelihood worth understanding
    likelihood, which integrates over the linear coefficients of the design
    matrix (and over the noise scale).  That marginalisation uses an *improper
    flat* prior, so the result is **not** scale-free: ln L keeps a
-   ``+0.5 * ln det(M^T Sigma^-1 M)`` term, and scaling the planet column by k
-   adds exactly ``+ln(k)``.  With ``normalize_model='per_order_median'`` (the
-   default) every template is placed on the same per-order scale, the term
-   becomes a constant, and the overall flux level really is unconstrained - so
-   planet radius, distance and flux calibration must not be sampled, and the
-   guidebook's ``log_R`` / absolute-flux machinery is deliberately absent.
-   ``log_g`` is retained because it changes the *shape*.
-   With ``normalize_model=None`` the ``+ln(k)`` term survives and rewards
-   brighter (hotter) models; see :meth:`SpectraRetriever._normalize_template`
-   for the measured size of that bias.
+   ``-0.5 * ln det(M^T Sigma^-1 M)`` term, and scaling the planet column by k
+   adds exactly ``-ln(k)`` (a genuine Occam penalty against larger amplitude).
+   With ``normalize_model='per_order_median'`` (the default) every template is
+   placed on the same per-order scale, the term becomes a constant, and the
+   overall flux level really is unconstrained - so planet radius, distance and
+   flux calibration must not be sampled, and the guidebook's ``log_R`` /
+   absolute-flux machinery is deliberately absent. ``log_g`` is retained
+   because it changes the *shape*.
+   With ``normalize_model=None`` the ``-ln(k)`` term survives and now
+   penalises brighter (hotter) models; see
+   :meth:`SpectraRetriever._normalize_template` for the measured size of that
+   effect. NOTE (2026-09-22): before this date, ``fast_likelihood_map`` /
+   ``likelihood_calculator`` had a sign bug that made this term
+   ``+0.5 * ln det(...)`` / ``+ln(k)`` instead, i.e. it *rewarded* brighter
+   models under ``normalize_model=None``. The bug was fixed in
+   ``fast_likelihood_calculator.py`` / ``spectra_processor.py`` on 2026-09-22
+   (found and confirmed against Landman et al. 2024 eq. 15 on 2026-09-05).
+   Point 1's conclusion for the *default* ``normalize_model='per_order_median'``
+   path is unaffected either way, since the term is a sampled-parameter-
+   independent constant in both the old and new sign -- only the un-normalised
+   (``normalize_model=None``) direction of the bias flips.
 
 2. **Sampling on delta ln L is equivalent to sampling on ln L.**  The star-only
    term uses model-matrix component 0, which does not depend on any sampled
@@ -128,7 +139,7 @@ Two consequences of the EXOCRIRES likelihood worth understanding
 Validation
 ----------
 ``build_model_matrix`` was checked against a literal transcription of the
-notebook's CELL 5 inner loop on the current WISPIT 1b stack: the star and
+notebook's CELL 5 inner loop on the validation dataset (WISPIT 1b): the star and
 planet components agree **exactly** (``np.array_equal``), so hoisting
 ``fit_star`` out of the velocity loop and restricting the order set changed no
 number.  Feeding the original injected template (``wispit_1b_spectra.npz``)
@@ -159,6 +170,29 @@ Needs petitRADTRANS-3 and exocrires importable together.  On this machine that
 is the ``prt3`` conda environment (Python 3.13); ``exocrires`` is symlinked into
 it.  exocrires itself targets numpy 1.x, so a ``np.trapz`` compatibility alias
 is installed at import time (numpy 2.0 renamed it ``np.trapezoid``).
+
+Scope: this module is system-agnostic
+------------------------------------
+Like the other EXOCRIRES stages, this is a *method* module: it knows how to turn
+a 2-D ABBA stack plus a prior into a posterior, and nothing about which object
+is being observed.  It therefore contains **no target table, no default prior
+ranges and no injected-truth values**.  Everything specific to a system lives in
+that project's driver:
+
+    exocrires.spectra_retriever          run_spectra_retriever.py
+    ---------------------------          -----------------------------------
+    SpectraRetriever, pRT_ForwardModel   which folders/days/stacks exist
+    Parameters, pt_profile               separations, v_sys, vsini
+    make_free_params (encoder)           the actual prior dict + ranges
+    build_retriever                      injected truth, log g, truth .npz
+
+Consequently priors reach this module only as a dict the driver writes out -
+``{name: (prior_spec, label)}``, encoded by :func:`make_free_params` - and
+:class:`SpectraRetriever` requires ``prep_T``/``prep_G``/``prep_Z`` rather than
+assuming a template.  To analyse a new system, write a new ``run_*.py`` with its
+own target table and priors and call :func:`build_retriever` - no edit to this
+file should be needed.  ``run_spectra_retriever.py`` (WISPIT 1 b/1 c) is the
+worked example.
 
 References
 ----------
@@ -244,30 +278,86 @@ LOG_CH_SOLAR   = -3.54     # log10(n_C/n_H)_solar, Asplund+2021
 LOG_F_H_SOLAR  = -7.6      # log10(n_F/n_H)_solar, Maiorca+2014
 LOG_CA_H_SOLAR = -5.73     # log10(n_Ca/n_H)_solar, Lodders 2020 (A(Ca)=6.27)
 
-# Piette+2020 / Xuan+2024 pressure nodes, log10(bar), deep -> shallow.
-LOG_P_NODES = np.array([0.7, 0.0, -0.3, -0.7, -1.0, -1.5, -3.0, -5.0])
-ANCHOR_IDX  = 3            # log P = -0.7 (0.2 bar), the photosphere anchor
+# ---- P-T node sets ----------------------------------------------------------
+#
+# A node set is (log10 pressure nodes deep -> shallow, index of the anchor).
+# The profile is built from the anchor outwards by non-negative increments dT_i,
+# so it is monotonic by construction, then interpolated in log P.
+#
+# 'piette8'  - Piette+2020 / Xuan+2024, the original 8-node set.  Anchor at
+#              0.2 bar.  Kept as the DEFAULT so earlier runs reproduce exactly.
+#
+# 'l24_4knot' - 4 knots after Landman+2024 (A&A 682, A48), who use 1 mbar /
+#              0.1 / 1 / 10 bar with a third-order spline for beta Pic b with
+#              CRIRES+.  Two deliberate differences here:
+#                * 5 bar replaces their 10 bar, because that is where this
+#                  parameterisation stops and the measured K-band emission
+#                  contribution function carries exactly 0.000 of the flux
+#                  below it (measured 2026-09-21 on the WISPIT 1b stack).
+#                * the anchor is the 1 bar knot, not a shallow one.  The
+#                  contribution function peaks at 0.79 bar, so this anchors the
+#                  profile at the best-measured pressure instead of at 0.2 bar,
+#                  which sits below the 5th percentile of the emission and made
+#                  every increment inherit the anchor's uncertainty.
+#              Four fewer free parameters than 'piette8', and with only one knot
+#              between 0.1 and 5 bar the sampler cannot build the unphysical
+#              1 bar kink the 8-node set produced (nabla = 0.14 then 0.59
+#              across adjacent layers, against a smooth truth at 0.21-0.26).
+PT_NODE_SETS = {
+    'piette8':   (np.array([0.7, 0.0, -0.3, -0.7, -1.0, -1.5, -3.0, -5.0]), 3),
+    'l24_4knot': (np.array([0.7, 0.0, -1.0, -3.0]), 1),
+}
 
-def pt_profile(params, pressure):
-    """Piette+2020 / Xuan+2024 P-T profile for a parameter dict.
+# Back-compatible module-level names: the default set.
+LOG_P_NODES = PT_NODE_SETS['piette8'][0]
+ANCHOR_IDX  = PT_NODE_SETS['piette8'][1]
+
+
+def pt_nodes(node_set='piette8'):
+    """(log10 P nodes deep->shallow, anchor index) for a named node set."""
+    if node_set not in PT_NODE_SETS:
+        raise ValueError('unknown P-T node set %r; known: %s'
+                         % (node_set, sorted(PT_NODE_SETS)))
+    return PT_NODE_SETS[node_set]
+
+
+def n_dT(node_set='piette8'):
+    """How many dT_i parameters a node set needs (one fewer than its nodes)."""
+    return len(PT_NODE_SETS[node_set][0]) - 1
+
+
+def pt_profile(params, pressure, node_set='piette8'):
+    """Node-based P-T profile for a parameter dict.
+
+    ``T_anchor`` is the temperature at the anchor node; ``dT_i`` are the
+    non-negative temperature increments between adjacent nodes, numbered deep
+    -> shallow, so the profile decreases monotonically outwards.  Interpolation
+    is PCHIP in log P: a cubic Hermite spline that, unlike an unconstrained
+    B-spline, cannot overshoot between knots, so monotonicity at the nodes
+    guarantees monotonicity everywhere.  (Landman+2024 get the same property
+    from an explicit no-inversion prior on a B-spline.)  Outside the node range
+    the profile is isothermal at the nearest node.
 
     Module-level twin of :meth:`pRT_ForwardModel.make_pt`, so posterior samples
     can be turned into temperature profiles without constructing a Radtrans
     (which would load opacities per sample).  ``make_pt`` delegates here, so the
     two can never drift apart.
     """
+    log_p_nodes, anchor_idx = pt_nodes(node_set)
+    n = len(log_p_nodes)
+
     pressure = np.asarray(pressure, dtype=float)
     T_anchor = float(params['T_anchor'])
-    dT = np.array([float(params['dT_%d' % (i + 1)]) for i in range(7)])
+    dT = np.array([float(params['dT_%d' % (i + 1)]) for i in range(n - 1)])
 
-    T_nodes = np.empty(8)
-    T_nodes[ANCHOR_IDX] = T_anchor
-    for j in range(ANCHOR_IDX - 1, -1, -1):
+    T_nodes = np.empty(n)
+    T_nodes[anchor_idx] = T_anchor
+    for j in range(anchor_idx - 1, -1, -1):
         T_nodes[j] = T_nodes[j + 1] + dT[j]
-    for j in range(ANCHOR_IDX + 1, 8):
+    for j in range(anchor_idx + 1, n):
         T_nodes[j] = T_nodes[j - 1] - dT[j - 1]
 
-    log_P_asc = LOG_P_NODES[::-1]
+    log_P_asc = log_p_nodes[::-1]
     T_asc = T_nodes[::-1]
     temperature = PchipInterpolator(log_P_asc, T_asc)(np.log10(pressure))
     log_P_atm = np.log10(pressure)
@@ -326,6 +416,9 @@ class Parameters:
     """
 
     def __init__(self, free_params, constant_params):
+        # Validate/normalise here too, so a hand-written dict gets the same
+        # checks whether or not the caller went through make_free_params().
+        free_params = make_free_params(free_params)
         self.params = {}
         self.param_priors = {}
         self.param_mathtext = {}
@@ -399,10 +492,12 @@ class pRT_ForwardModel:
         Required only for ``chemistry='equilibrium'``.
     """
 
-    def __init__(self, radtrans, params, species, pressure, eq_chem=None):
+    def __init__(self, radtrans, params, species, pressure, eq_chem=None,
+                 pt_node_set='piette8'):
         self.radtrans = radtrans
         self.params = params
         self.species = list(species)
+        self.pt_node_set = pt_node_set
         self.pressure = np.asarray(pressure, dtype=float)
         self.n_atm_layers = self.pressure.size
         self.eq_chem = eq_chem
@@ -435,15 +530,16 @@ class pRT_ForwardModel:
     # ---- P-T profile ----
 
     def make_pt(self):
-        """Piette+2020 / Xuan+2024 P-T profile on the module's pressure grid.
+        """Node-based P-T profile on the module's pressure grid.
 
-        ``T_anchor`` fixes the temperature at 0.2 bar (inside the K-band
-        photosphere); seven non-negative increments ``dT_1..dT_7`` build the
-        remaining nodes outward from it, and a monotonic PCHIP spline maps the
-        eight nodes onto the layer grid.  Non-negativity - hence monotonicity -
-        comes from the priors, not from code here.
+        ``T_anchor`` fixes the temperature at the anchor node; the non-negative
+        increments ``dT_i`` build the remaining nodes outward from it, and a
+        monotonic PCHIP spline maps them onto the layer grid.  Non-negativity -
+        hence monotonicity - comes from the priors, not from code here.  Which
+        nodes, and which of them is the anchor, is set by ``pt_node_set``
+        (see :data:`PT_NODE_SETS`).
         """
-        return pt_profile(self.params, self.pressure)
+        return pt_profile(self.params, self.pressure, self.pt_node_set)
 
     # ---- chemistry ----
 
@@ -662,6 +758,19 @@ class SpectraRetriever:
         already sit at R=1e5 and be broadened twice.  Default 4 (R=2.5e5).
     n_atm_layers : int
         Number of pressure layers, log-spaced over ``pressure_range``.
+    prep_T, prep_G, prep_Z : float
+        Temperature, log g and metallicity identifying the synthetic spectrum
+        :class:`input_spectra_preparation.Spectra_Preparator` builds the
+        transmission from.  **Required** - they describe the system, not the
+        method, so there is no sensible default here.
+    spectra_input_folder : str
+        Folder (under ``path_root``) holding the prepared input spectra.
+    v_sys : float, optional
+        System velocity in km/s.  Carried for the driver's convenience.
+    log_g_true, truth_npz, target_name : optional
+        Injected log g, the reference model .npz and a label for this dataset.
+        Purely descriptive - used by drivers for reporting and by
+        :meth:`check_truth_consistency`.
     objective : {'delta_lnL', 'lnL'}
         What MultiNest samples.  See the module docstring.
     """
@@ -686,14 +795,38 @@ class SpectraRetriever:
                  window=300,
                  polyorder=2,
                  vsini=20.0,
+                 prep_T=None,
+                 prep_G=None,
+                 prep_Z=None,
+                 spectra_input_folder='/spectra_input',
+                 v_sys=None,
+                 log_g_true=None,
+                 truth_npz=None,
+                 target_name=None,
                  normalize_model='per_order_median',
                  t_min=150.0,
                  t_max=6000.0,
+                 pt_node_set='piette8',
                  ld_coeff=None,
                  instrument_R=1e5,
                  objective='delta_lnL',
                  output_dir=None,
                  prefix='retrieval_'):
+
+        # The preparator's (T, G, Z) select the synthetic template the
+        # transmission is derived against; they describe the OBSERVED SYSTEM,
+        # not the method, so this module refuses to guess them.  Pass them from
+        # the project's target table (see the module docstring).  Checked first,
+        # before any path is touched, so a misconfigured target fails fast.
+        if prep_T is None or prep_G is None or prep_Z is None:
+            raise ValueError(
+                'prep_T, prep_G and prep_Z are required - they identify the '
+                'synthetic spectrum used to build the transmission and are '
+                'properties of the system being analysed, not of this module. '
+                'Typically they are the model that produced the stack, e.g. '
+                "model_name '1650-4.0--0.4' -> prep_T=1650, prep_G=4.0, "
+                'prep_Z=-0.4.')
+        self.prep_T, self.prep_G, self.prep_Z = prep_T, prep_G, prep_Z
 
         self.path_root = path_root
         self.folder_name = folder_name
@@ -716,6 +849,10 @@ class SpectraRetriever:
         # driving the upper atmosphere below zero; make_pt would then silently
         # clamp at 1 K and hand pRT a nonsense profile.  Samples outside
         # [t_min, t_max] are rejected instead.
+        if pt_node_set not in PT_NODE_SETS:
+            raise ValueError('pt_node_set must be one of %s, got %r'
+                             % (sorted(PT_NODE_SETS), pt_node_set))
+        self.pt_node_set = pt_node_set
         self.t_min = float(t_min)
         self.t_max = float(t_max)
         self._n_rejected_pt = 0
@@ -756,7 +893,16 @@ class SpectraRetriever:
 
         self.ld_coeff = ld_coeff
         self.prep = input_spectra_preparation.Spectra_Preparator(
-            folder_name='/spectra_input', T=1650, G=4.0, Z=-0.4, path=path_root)
+            folder_name=spectra_input_folder, T=prep_T, G=prep_G, Z=prep_Z,
+            path=path_root)
+
+        # Optional descriptors of the dataset.  Nothing in this class computes
+        # with them; they travel with the retriever so drivers and plotting code
+        # can report injected truth without a second lookup table.
+        self.v_sys = v_sys
+        self.log_g_true = log_g_true
+        self.truth_npz = truth_npz
+        self.target_name = target_name
 
         self.radtrans = None
         self.eq_chem = None
@@ -1025,18 +1171,30 @@ class SpectraRetriever:
 
         WHY THIS IS NECESSARY.  ``fast_likelihood_map`` marginalises the model
         amplitude with an *improper flat* prior, so its log-likelihood carries a
-        ``+0.5 * ln det(M^T Sigma^-1 M)`` term.  Scaling the planet column by k
-        therefore adds ``+ln(k)`` to ln L - verified exactly: scaling a template
-        by 1e3 moves delta ln L by +6.9078 = ln(1e3).
+        ``-0.5 * ln det(M^T Sigma^-1 M)`` term.  Scaling the planet column by k
+        therefore adds ``-ln(k)`` to ln L (an Occam penalty against amplitude).
+
+        NOTE (2026-09-22): the sign above was flipped on this date in
+        ``fast_likelihood_calculator.py`` / ``spectra_processor.py`` (a genuine
+        bug, found and confirmed against Landman et al. 2024 eq. 15 on
+        2026-09-05: the code previously computed ``+0.5 * ln det(...)`` /
+        ``+ln(k)``, rewarding rather than penalising larger amplitude). The
+        measurement below ("+6.9078 = ln(1e3)") and the "reward for hotter,
+        brighter atmospheres" description are from *before* that fix and are
+        now the mirror image: today the un-normalised term would instead
+        *penalise* brighter/hotter models by the same magnitude. Either sign is
+        still a spurious, parameter-dependent artifact with no physical
+        content, so normalising it away here remains equally necessary; only
+        the direction of the bias it would otherwise cause has flipped.
 
         For the original study that was harmless: every template on the velocity
-        grid came from one .npz at one fixed scale, so ``+ln(k)`` was a constant
+        grid came from one .npz at one fixed scale, so this term was a constant
         offset that cancelled everywhere.  In a *retrieval* it is not harmless -
         pRT's absolute flux rises steeply with temperature (a factor ~29 across
-        the T_anchor prior on this setup), so the term becomes a spurious
-        ``+ln(flux)`` reward for hotter, brighter atmospheres worth up to ~3.4
-        nat per order, ~17 nat over five orders, against a real signal of ~155.
-        Left uncorrected it biases the posterior towards high temperature.
+        the T_anchor prior on this setup), so the term becomes a spurious,
+        temperature-dependent artifact worth up to ~3.4 nat per order, ~17 nat
+        over five orders, against a real signal of ~155. Left uncorrected it
+        biases the posterior in whichever direction the current sign implies.
 
         Dividing each order's template by its own median removes it.  That costs
         nothing in information: the per-order likelihood assembly already gives
@@ -1191,7 +1349,7 @@ class SpectraRetriever:
             Also return the per-order breakdown and timings.
         """
         # Cheap physical rejection before paying for a pRT evaluation.
-        _T = pt_profile(params, self.pressure)
+        _T = pt_profile(params, self.pressure, self.pt_node_set)
         if _T.min() < self.t_min or _T.max() > self.t_max:
             self._n_rejected_pt += 1
             if return_parts:
@@ -1202,7 +1360,8 @@ class SpectraRetriever:
         fm = pRT_ForwardModel(self.get_atmosphere(), params, self.species,
                               self.pressure,
                               eq_chem=self.get_eq_chem()
-                              if params.get('chemistry') == 'equilibrium' else None)
+                              if params.get('chemistry') == 'equilibrium' else None,
+                              pt_node_set=self.pt_node_set)
         wl_m, flux = fm.make_prt_flux()
         t1 = time.time()
 
@@ -1261,7 +1420,8 @@ class SpectraRetriever:
         fm = pRT_ForwardModel(self.get_atmosphere(), params, self.species,
                               self.pressure,
                               eq_chem=self.get_eq_chem()
-                              if params.get('chemistry') == 'equilibrium' else None)
+                              if params.get('chemistry') == 'equilibrium' else None,
+                              pt_node_set=self.pt_node_set)
         wl_m, flux = fm.make_prt_flux()
         template = self.prepare_template(
             wl_m, flux, rv=params['rv'],
@@ -1450,229 +1610,164 @@ class SpectraRetriever:
 
 
 # ============================================================
-# 5. PRIOR FACTORIES
+# 5. PRIOR FACTORIES  (generic - no system-specific numbers)
 # ============================================================
+#
+# These builders assemble the parameter NAMES the forward model understands and
+# attach whatever prior the caller supplies.  They deliberately carry no default
+# ranges: a prior encodes what you believe about a particular object, so it
+# belongs in that project's run_*.py, not in a module shared by every system.
+#
+# A prior spec is either a ``(lo, hi)`` uniform or the dict returned by
+# :func:`gaussian`.  ``Parameters`` maps both onto the unit cube.
 
-# Per-node dT prior bounds, tuned for a young ~1500-1700 K L-type giant planet
-# (the WISPIT 1b class).  The nodes are NOT equally spaced in log P, so a single
-# shared bound is wrong: dT_1 spans 5 -> 1 bar through the deep, steep,
-# near-adiabatic interior, while dT_4/dT_5 each span less than half a decade in
-# the nearly isothermal upper photosphere.
-#
-# Reference values, from the P-T profile stored in wispit_1b_spectra.npz
-# interpolated onto the eight Piette nodes:
-#
-#     T_anchor = 1298 K
-#     dT       = [768, 315, 309, 133, 135, 200, 70]   (deep -> shallow)
-#
-# CAUTION: that npz is NOT necessarily the model inside any given ABBA stack.
-# The WISPIT 1b npz was overwritten on 2026-09-07, while the 260609 stack was
-# built on 2026-06-14 from an earlier model; the two spectra correlate only
-# r ~ 0.79 and differ in flux by a factor ~7.  Always compare mtimes before
-# treating the npz as ground truth for a stack (see check_truth_consistency()).
-#
-# The bounds below are kept because they are generous enough to contain both
-# that profile and the (cooler) one the 260609 stack actually carries, while
-# staying uninformative.  The previous flat dT = (0, 800) put dT_1 = 768 K
-# within 4% of its upper bound, which is too tight for comfort either way.
-_DT_BOUNDS_DEFAULT = {
-    1: (0., 1200.),   # 5.0  -> 1.0   bar   deep interior, steep adiabat
-    2: (0.,  800.),   # 1.0  -> 0.5   bar
-    3: (0.,  800.),   # 0.5  -> 0.2   bar   into the photosphere
-    4: (0.,  400.),   # 0.2  -> 0.1   bar   photosphere, shallow gradient
-    5: (0.,  400.),   # 0.1  -> 0.032 bar
-    6: (0.,  500.),   # 0.032-> 0.001 bar
-    7: (0.,  400.),   # 0.001-> 1e-5  bar   upper atmosphere, unconstrained by K band
-}
+
+def uniform(lo, hi):
+    """Uniform prior spec.  Provided for symmetry with :func:`gaussian`."""
+    return [float(lo), float(hi)]
 
 
 def gaussian(mu, sigma):
-    """Gaussian prior spec, for use anywhere a ``[lo, hi]`` uniform is accepted.
+    """Gaussian prior spec, for use anywhere a ``(lo, hi)`` uniform is accepted.
 
     ``Parameters.__call__`` maps this through ``norm.ppf``.  The natural use is
     a parameter constrained by information outside the spectrum - surface
     gravity being the standard case, since mass and radius come from
-    evolutionary models rather than from the K-band lines.  Because log g is
-    strongly degenerate with metallicity here (posterior r ~ +0.45), a uniform
-    log g prior lets that degeneracy run to the prior edge; a Gaussian anchors
-    it instead.
+    evolutionary models rather than from the line shapes.  Where log g is
+    strongly degenerate with metallicity, a uniform prior lets that degeneracy
+    run to the prior edge; a Gaussian anchors it instead.
     """
     return {'type': 'gaussian', 'mu': float(mu), 'sigma': float(sigma)}
 
 
 def _as_prior(spec):
-    """Pass a prior spec through unchanged if it is already a dict."""
+    """Normalise a prior spec: dicts pass through, pairs become ``[lo, hi]``."""
     if isinstance(spec, dict):
         return spec
-    return [spec[0], spec[1]]
+    return [float(spec[0]), float(spec[1])]
 
+def make_free_params(priors):
+    """Encode a prior dictionary into the form :class:`Parameters` samples.
 
-def _pt_priors(T_anchor=(600., 2200.), dT=None):
-    """Piette P-T priors: one anchor temperature and seven increments.
+    This is the single entry point for priors.  The calling ``run_*.py`` writes
+    out what it believes about its object as one flat dict; this function
+    normalises it and checks it for outright mistakes.  The package holds no
+    ranges of its own - see the module docstring.
 
-    ``T_anchor`` is the temperature at 0.2 bar, inside the K-band photosphere;
-    (600, 2200) K brackets the WISPIT 1b class with wide margin.  ``dT`` may be
-    a single ``(lo, hi)`` applied to every node (the old behaviour) or a dict
-    ``{i: (lo, hi)}``; it defaults to the per-node bounds above.
+    Parameters
+    ----------
+    priors : dict
+        ``{name: (prior_spec, mathtext_label)}``.  Following the guidebook
+        convention, the *shape* of ``prior_spec`` chooses the prior:
+
+        * ``{'type': 'gaussian', 'mu': mu, 'sigma': sigma}``  -> Gaussian
+        * anything else 2-element, e.g. ``[lo, hi]``          -> uniform
+
+        so switching a parameter between the two is a one-line edit in the
+        caller's dict and nothing here needs to know which is "right".  The
+        label is optional: ``{name: prior_spec}`` works too.
+
+    Returns
+    -------
+    dict
+        The same mapping, normalised, ready for ``Parameters(free, fixed)``.
+
+    Notes
+    -----
+    **Key order is significant** - MultiNest addresses parameters positionally,
+    so this dict's order fixes the posterior's column order.  Keep it stable
+    between a run and any later analysis of it.
+
+    Names must be ones the forward model understands: the P-T set
+    (``T_anchor``, ``dT_1``..``dT_7``), ``log_g``, ``rv``, optionally
+    ``vsini``; then either equilibrium parameters (``C_H``, ``C/O``,
+    ``log_12CO_13CO``, optionally ``log_Pquench``/``F_H``) or one
+    ``log_<species>`` per free-chemistry species.  Unknown names pass through
+    and the forward model raises if it cannot use them.
     """
-    d = {'T_anchor': ([T_anchor[0], T_anchor[1]], r'$T_{\rm anchor}$')}
-    for i in range(1, 8):
-        if dT is None:
-            lo, hi = _DT_BOUNDS_DEFAULT[i]
-        elif isinstance(dT, dict):
-            lo, hi = dT[i]
+    if not isinstance(priors, dict):
+        raise TypeError('priors must be a dict {name: (spec, label)}, got %s'
+                        % type(priors).__name__)
+    if not priors:
+        raise ValueError('priors is empty - nothing to sample')
+
+    out = {}
+    for name, entry in priors.items():
+        # Accept both {name: (spec, label)} and the shorthand {name: spec}.
+        if (isinstance(entry, tuple) and len(entry) == 2
+                and isinstance(entry[1], str)):
+            spec, label = entry
         else:
-            lo, hi = dT
-        d['dT_%d' % i] = ([lo, hi], r'$\Delta T_%d$' % i)
-    return d
+            spec, label = entry, name
 
+        if isinstance(spec, dict) and spec.get('type') == 'gaussian':
+            if 'mu' not in spec or 'sigma' not in spec:
+                raise ValueError("%s: gaussian prior needs 'mu' and 'sigma'"
+                                 % name)
+            if not float(spec['sigma']) > 0:
+                raise ValueError('%s: gaussian sigma must be > 0, got %r'
+                                 % (name, spec['sigma']))
+            spec = {'type': 'gaussian', 'mu': float(spec['mu']),
+                    'sigma': float(spec['sigma'])}
+        elif isinstance(spec, dict):
+            raise ValueError(
+                "%s: prior dicts must carry type='gaussian' (got %r).  For a "
+                'uniform prior pass [lo, hi].' % (name, spec.get('type')))
+        else:
+            try:
+                lo, hi = (float(spec[0]), float(spec[1]))
+            except (TypeError, IndexError, ValueError, KeyError):
+                raise ValueError(
+                    '%s: prior must be [lo, hi] or a gaussian dict, got %r'
+                    % (name, spec))
+            if not hi > lo:
+                raise ValueError('%s: uniform prior needs hi > lo, got [%g, %g]'
+                                 % (name, lo, hi))
+            spec = [lo, hi]
 
-def make_free_params_free_chem(species_labels=('H2O', '12CO', 'CH4'),
-                               rv=(-100., 100.), vsini=None,
-                               log_g=(3.0, 5.5), log_vmr=(-12., -1.)):
-    """Free-chemistry priors: P-T + one log-VMR per species + RV + log g.
+        out[name] = (spec, label)
 
-    ``species_labels`` are species_info.csv row names (``'H2O'``, ``'12CO'``,
-    ``'CH4'``, ...), which become ``log_H2O`` etc.
-    """
-    free = _pt_priors()
-    for sp in species_labels:
-        free['log_%s' % sp] = ([log_vmr[0], log_vmr[1]],
-                               r'$\log\,$%s' % sp)
-    free['log_g'] = (_as_prior(log_g), r'$\log g$')
-    free['rv'] = (_as_prior(rv), r'$v_{\rm rad}$')
-    if vsini is not None:
-        free['vsini'] = ([vsini[0], vsini[1]], r'$v\sin i$')
-    return free
-
-
-def make_free_params_equilibrium(rv=(-100., 100.), log_g=(3.0, 5.5),
-                                 C_H=(-1.5, 1.5), CO=(0.1, 1.6),
-                                 log_12CO_13CO=(1.0, 2.5), F_H=None,
-                                 log_Pquench=None):
-    """Equilibrium-chemistry priors: P-T + [C/H] + C/O + isotopologue + RV.
-
-    ``log_g`` accepts either ``(lo, hi)`` for a uniform prior or the output of
-    :func:`gaussian` for a Gaussian one.  Prefer the Gaussian: surface gravity
-    is known from mass and radius independently of the spectrum, and a uniform
-    prior lets the log g - metallicity degeneracy push the posterior into the
-    prior ceiling (measured: 28% of samples within 0.2 dex of a 5.5 bound).
-    """
-    free = _pt_priors()
-    free['C_H'] = ([C_H[0], C_H[1]], r'$[\mathrm{C/H}]$')
-    free['C/O'] = ([CO[0], CO[1]], r'C/O')
-    free['log_12CO_13CO'] = ([log_12CO_13CO[0], log_12CO_13CO[1]],
-                             r'$\log\,^{12}$CO/$^{13}$CO')
-    if F_H is not None:
-        free['F_H'] = ([F_H[0], F_H[1]], r'$[\mathrm{F/H}]$')
-    if log_Pquench is not None:
-        # Carbon quench pressure, log10(bar).  Passed straight through to pRT's
-        # PreCalculatedEquilibriumChemistryTable(carbon_pressure_quench=...),
-        # which freezes CH4/CO/H2O above the quench level (NH3 is NOT quenched
-        # by that call).  Required to model the disequilibrium quench_* datasets;
-        # leave None for the equilibrium ones.
-        free['log_Pquench'] = ([log_Pquench[0], log_Pquench[1]],
-                               r'$\log P_{\rm quench}$')
-    free['log_g'] = (_as_prior(log_g), r'$\log g$')
-    free['rv'] = (_as_prior(rv), r'$v_{\rm rad}$')
-    return free
+    # The Piette profile is built from increments, so dT_i >= 0 is what keeps it
+    # monotonic - Parameters.__call__ has no ordering logic.  A negative lower
+    # bound is legal (an inversion may be what you want) but is almost always a
+    # typo, so say so rather than silently producing a non-monotonic profile.
+    for name, (spec, _) in out.items():
+        if name.startswith('dT_') and not isinstance(spec, dict) and spec[0] < 0:
+            warnings.warn(
+                '%s has a negative lower bound (%g): the P-T profile will not '
+                'be monotonic there.  Intended?' % (name, spec[0]))
+    return out
 
 
 # ============================================================
-# 6. WISPIT 1b convenience constructor
+# 6. BUILDING A RETRIEVER FROM A PROJECT TARGET TABLE
 # ============================================================
 
-# Known WISPIT datasets.  Each entry names the day folder holding the ABBA
-# stack, the planet model folder, and the prepared stellar spectrum used to
-# derive the telluric/instrument transmission.
-#
-# IMPORTANT - which stack matches wispit_1b_spectra.npz:
-# The npz was regenerated on 2026-09-07 for the chemistry-regime study, and the
-# '20260907_*' day folders were built from it the following night.  The older
-# '260609' stack predates that and carries a DIFFERENT planet spectrum (r ~ 0.79
-# against the current npz, flux lower by ~7x), so the npz's P-T profile is not
-# ground truth for it.  '1b' therefore points at the equilibrium September run,
-# which is the self-consistent pair; use '1b_260609' only to reproduce the old
-# analysis.  See SpectraRetriever.check_truth_consistency().
-_STAR_SEP = 'WISPIT_1b/%s/spectra_input/upload_star_lowres_K2166_rot_lsf_19km.dat'
 
-WISPIT_TARGETS = {
-    # September 2026 model series - stack and npz agree.
-    '1b': dict(folder_name='WISPIT_1b', day='20260907_equa',
-               model_name='1650-4.0--0.4', Sep_p=25, v_sys=19, vsini=20,
-               star_dat=_STAR_SEP % '20260907_equa'),
-    '1b_equa': dict(folder_name='WISPIT_1b', day='20260907_equa',
-                    model_name='1650-4.0--0.4', Sep_p=25, v_sys=19, vsini=20,
-                    star_dat=_STAR_SEP % '20260907_equa'),
-    '1b_quench_1': dict(folder_name='WISPIT_1b', day='20260907_quench_1',
-                        model_name='1650-4.0--0.4', Sep_p=25, v_sys=19, vsini=20,
-                        star_dat=_STAR_SEP % '20260907_quench_1'),
-    '1b_quench_5': dict(folder_name='WISPIT_1b', day='20260907_quench_5',
-                        model_name='1650-4.0--0.4', Sep_p=25, v_sys=19, vsini=20,
-                        star_dat=_STAR_SEP % '20260907_quench_5'),
-    '1b_quench_10': dict(folder_name='WISPIT_1b', day='20260907_quench_10',
-                         model_name='1650-4.0--0.4', Sep_p=25, v_sys=19, vsini=20,
-                         star_dat=_STAR_SEP % '20260907_quench_10'),
-    # 2026-09-09 series: identical setup with NDIT 20 (was 15), i.e. total
-    # integration DIT x NDIT x 2 nods = 24000 s = 6.67 h (was 5.00 h).
-    '1b_ndit20_equa': dict(folder_name='WISPIT_1b', day='20260909_equa',
-                           model_name='1650-4.0--0.4', Sep_p=25, v_sys=19, vsini=20,
-                           star_dat=_STAR_SEP % '20260909_equa'),
-    '1b_ndit20_quench_5': dict(folder_name='WISPIT_1b', day='20260909_quench_5',
-                               model_name='1650-4.0--0.4', Sep_p=25, v_sys=19, vsini=20,
-                               star_dat=_STAR_SEP % '20260909_quench_5'),
-    # Superseded June stack - kept for reproducing the earlier analysis only.
-    '1b_260609': dict(folder_name='WISPIT_1b', day='260609',
-                      model_name='1650-4.0--0.4', Sep_p=25, v_sys=19, vsini=20,
-                      star_dat='WISPIT_1b/spectra_input/'
-                               'upload_star_lowres_M4368_rot_lsf_19km.dat'),
-    '1c': dict(folder_name='WISPIT_1c', day='260611',
-               model_name='1200-3.5--0.3', Sep_p=62, v_sys=19, vsini=20,
-               star_dat='WISPIT_1c/spectra_input/'
-                        'upload_star_lowres_K2166_rot_lsf_19km.dat'),
-}
+def build_retriever(config, **overrides):
+    """Construct a :class:`SpectraRetriever` from a target-description dict.
 
-# Surface gravity of the model injected into each dataset (from the model
-# folder name, e.g. '1650-4.0--0.4' -> log g = 4.0).  Used to centre the
-# Gaussian log g prior, mirroring how a real retrieval would take log g from
-# mass and radius rather than from the spectrum.
-WISPIT_LOG_G = {
-    '1b': 4.0, '1b_equa': 4.0, '1b_quench_1': 4.0,
-    '1b_quench_5': 4.0, '1b_quench_10': 4.0, '1b_260609': 4.0, '1c': 3.5,
-    '1b_ndit20_equa': 4.0, '1b_ndit20_quench_5': 4.0,
-}
+    ``config`` is a plain dict of :class:`SpectraRetriever` keyword arguments -
+    the shape a project's own target table takes.  ``overrides`` win, so one
+    entry can be pointed at another day folder or stellar file without editing
+    the table.
 
-# Which model .npz each dataset was built from, for check_truth_consistency().
-WISPIT_TRUTH_NPZ = {
-    '1b': 'wispit_1b_spectra.npz',
-    '1b_equa': 'wispit_1b_spectra.npz',
-    '1b_quench_1': 'wispit_1b_spectra_neq_pq1.npz',
-    '1b_quench_5': 'wispit_1b_spectra_neq_pq5.npz',
-    '1b_quench_10': 'wispit_1b_spectra_neq_pq10.npz',
-    '1b_ndit20_equa': 'wispit_1b_spectra.npz',
-    '1b_ndit20_quench_5': 'wispit_1b_spectra_neq_pq5.npz',
-    '1b_260609': None,          # its source model was overwritten; see above
-    '1c': 'wispit_1c_spectra.npz',
-}
+    This module ships no target table of its own: which folders, separations
+    and system velocities exist is a property of a campaign, not of the
+    retrieval method.  Define the table in the project's ``run_*.py``.
 
-
-def wispit_retriever(target='1b', path_root='/Users/richard/Simulation_WISPIT_1',
-                     **kwargs):
-    """Build a :class:`SpectraRetriever` for a WISPIT target."""
-    if target not in WISPIT_TARGETS:
-        raise ValueError('target must be one of %s' % list(WISPIT_TARGETS))
-    cfg = dict(WISPIT_TARGETS[target])
-    v_sys = cfg.pop('v_sys')
-    kwargs.setdefault('vsini', cfg.pop('vsini'))
-    cfg.pop('vsini', None)
-    # Explicit kwargs win, so a caller can point the same target at another day
-    # folder or stellar file without editing WISPIT_TARGETS.
-    for key in list(cfg):
-        if key in kwargs:
-            cfg.pop(key)
-    r = SpectraRetriever(path_root=path_root, **cfg, **kwargs)
-    r.v_sys = v_sys
-    r.target_name = target
-    r.truth_npz = WISPIT_TRUTH_NPZ.get(target)
-    r.log_g_true = WISPIT_LOG_G.get(target)
-    return r
+    Example
+    -------
+    >>> TARGETS = {'1b': dict(folder_name='WISPIT_1b', day='20260907_equa',
+    ...                       model_name='1650-4.0--0.4', Sep_p=25, v_sys=19,
+    ...                       vsini=20, prep_T=1650, prep_G=4.0, prep_Z=-0.4,
+    ...                       star_dat='WISPIT_1b/.../upload_star.dat')}
+    >>> r = build_retriever(dict(TARGETS['1b'], path_root='/path/to/project'))
+    """
+    cfg = dict(config)
+    cfg.update(overrides)
+    missing = [k for k in ('path_root', 'folder_name', 'day', 'model_name',
+                           'star_dat') if k not in cfg]
+    if missing:
+        raise ValueError('target config is missing %s' % ', '.join(missing))
+    return SpectraRetriever(**cfg)
