@@ -1,9 +1,10 @@
 <img width="360" height="360" alt="EXOCRIRES_logo_white_centered" src="https://github.com/user-attachments/assets/a98d80a6-b776-4c6b-bb42-a7a1b3aa3cd3" />
 
 # EXOCRIRES
--- A CRIRES+ observation simulator for direct-imaged planets-- 
+-- An end-to-end CRIRES+ observation simulator for direct-imaged planets-- 
 
 Welcome to EXOCRIRES V1.0! This is a 2-D synthetic observation pipeline/mock observation generator to analyze the feasibility of high-contrast spectroscopy for direct-imaged planetary systems.
+The current version is: V1.16.0, updated on 23/Nov/2026
 
 The overall workflow is here:
 

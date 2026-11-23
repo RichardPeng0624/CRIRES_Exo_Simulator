@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='exocrires',
-    version='1.15.0',
+    version='1.16.0',
     # setup.py lives inside the package directory itself.
     # Explicitly map package name to current directory so editable/wheel installs work.
     packages=['exocrires'],
