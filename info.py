@@ -10,3 +10,8 @@ lambda_range={'key':['Y1029', 'J1226', 'H1559', 'K2166', 'L3377', 'L3302', 'M436
       [[3512.841, 3582.734], [3747.081, 3821.617], [4014.774, 4094.586], [4323.720, 4409.760], [4683.789, 4776.814], [5109.398, 5210.712]]],\
 'reference_wave':[1029.310, 1226, 1559, 2166.016, 3376.965, 3302.210, 4368.182]}
     
+
+def band_index(key):
+    '''Position of a setting in lambda_range, e.g. band_index('K2166') -> 3.
+    Use this instead of negative indices: appending bands (M4368, Sep 2026) shifts lambda_range[...][-3].'''
+    return lambda_range['key'].index(key)

@@ -132,8 +132,14 @@ class Spectra_Preparator:
 
     def gaussian_broaden(self, wavelength, flux, R):
         """
+        Line-spread function (LSF) convolution using Gaussian broadening:
         Apply Gaussian broadening to the spectrum for LSF convolution.
         R: Spectral resolution.
+
+        NOTE (2026-11-20, known bug, left unchanged for reproducibility): sigma is set from the FIRST
+        log-step only, but apply_broadening() passes a grid that is linear in lambda, so the kernel has a
+        constant FWHM = lambda_min / R. For the K2166 prep (lambda_min = 1421 nm) "R=1e5" is really
+        R ~ 1.37e5 (1941 nm) - 1.72e5 (2447 nm). Fix (log-lambda resampling) when templates are regenerated.
         """
         log_wavelength = np.log(wavelength)
         fwhm_log = 1 / R
@@ -150,7 +156,7 @@ class Spectra_Preparator:
         N = ave_R * (lam_range / lam_mid) + 1
         return int(N)
 
-    def apply_broadening(self, wave, flux, lam_range, ld_coeff, R=1e5, rotation=5e0, reu=500, step_size=1e-12, interpolation='spline', wave_template=None):
+    def apply_broadening(self, wave, flux, lam_range, ld_coeff, R=None, rotation=5e0, reu=500, step_size=1e-12, interpolation='spline', wave_template=None, R_sample=None):
         """
         Calculate rotational broadening and Apply all broadening effects to the spectrum.
 
@@ -159,12 +165,16 @@ class Spectra_Preparator:
         flux: Flux array of the spectrum.
         lam_range: Wavelength range for cutting the spectrum.
         ld_coeff: Limb darkening coefficients.
-        R: Spectral resolution.
+        R: Spectral resolution of the Gaussian LSF. None (or 0) skips the LSF -> rotation only.
+           Use None for spectra uploaded to ETC >= v118, which convolves with the CRIRES+ instrumental
+           profile itself (R=1e5 here would apply the LSF twice: R_eff ~ 77k).
         rotation: Stellar rotation velocity.
         reu: Radial velocity shift.
         step_size: Step size for interpolation. It can be string {2x, mean} or float value.
         interpolation: Interpolation method ('linear' or 'spline').
         wave_template: Default as 'None'. It is necessary when using 'spline' interpolation. We suggest to use the wavelength solution from telluric model calculated from ETC.
+        R_sample: resolving power that sets the output grid (2 points per resolution element) when
+           wave_template is None. Default: R, or 1e5 if R is None -> same grid as the R=1e5 products.
         """
 
         if (wave[1]-wave[0]) != (wave[-1]-wave[-2]):
@@ -185,7 +195,9 @@ class Spectra_Preparator:
             elif interpolation =='linear':
                 wave_new, flux_new = pyasl.equidistantInterpolation(wave, flux, step_size)
 
-    
+        else:
+            wave_new, flux_new = wave, flux   # already equidistant (was a NameError before)
+
         mask =  ( (wave_new >= (lam_range[0][0]-reu)*1e-9) & (wave_new <= (lam_range[-1][-1]+reu)*1e-9) )
         rflux = pyasl.fastRotBroad(
             wvl=wave_new[mask],
@@ -193,15 +205,23 @@ class Spectra_Preparator:
             epsilon=ld_coeff,
             vsini=rotation
         )
-        broadened_flux = self.gaussian_broaden(wave_new[mask], rflux, R)
+        if R:
+            broadened_flux = self.gaussian_broaden(wave_new[mask], rflux, R)
+        else:
+            broadened_flux = rflux      
+        # no instrumental LSF: the ETC (>= v118) applies it, and thus the following line would double-convolve the spectrum. Use R=None to skip the LSF.
+        #broadened_flux = self.gaussian_broaden(wave_new[mask], rflux, R)
 
-       
+        if R_sample is None:
+            R_sample = R if R else 1e5  # output sampling decoupled from the LSF
+
         if wave_template is not None:
             wave_grid = wave_template
 
         else:
             # Resample to desired resolution is the dataset tends to be too large from oversampling
-            N = self.resolution_sample(R*2, wave_new[mask])
+            N = self.resolution_sample(R_sample*2, wave_new[mask])
+            #N = self.resolution_sample(R*2, wave_new[mask])
             wave_grid = np.linspace(np.min(wave_new[mask]), np.max(wave_new[mask]), N)
 
         if interpolation == 'linear':

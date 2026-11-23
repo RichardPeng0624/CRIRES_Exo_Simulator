@@ -10,6 +10,43 @@ import scipy
 import json
 import subprocess
 import os
+import sys
+
+
+#------------------
+# ETC output reader (ETC v118.1.0, Nov 2026). Replaces ESO's etc_json2ascii.py + the .ascii stage.
+
+def iter_etc_series(etc_json):
+    '''
+    Yield (order, detector, key, x, y) for every series in an ETC output JSON object.
+    order / detector are strings ('29', '1'); key is '<group>_<series>' (e.g. 'signals_obstarget')
+    or 'psf'; x is wavelength [m] (angle for psf). Reads both layouts:
+      v118+ : data.plots.spectra[] (detector_name 'detector1') + data.plots.psfs[]
+      v117  : data.orders[].detectors[] (name '1')
+    '''
+    data = etc_json['data']
+
+    def values(y):  # windowed plot data come as {center, low, high}
+        return y['center'] if isinstance(y, dict) else y
+
+    if 'plots' in data:                                    # ETC >= v118
+        spectra = data['plots']['spectra']
+        psfs = data['plots'].get('psfs') or []
+        for n, spec in enumerate(spectra):
+            order = str(spec.get('order'))
+            det = str(spec['detector_name']).replace('detector', '')
+            for group, plot in (spec.get('plots') or {}).items():
+                for series, y in plot.items():
+                    yield order, det, '%s_%s' % (group, series), spec['wavelength'], values(y)
+            if n < len(psfs) and (psfs[n] or {}).get('psf'):
+                yield order, det, 'psf', psfs[n]['psf']['angle'], psfs[n]['psf']['psf']
+    else:                                                  # legacy ETC v117
+        for od in data['orders']:
+            for detector in od['detectors']:
+                for group, plot in detector['plots'].items():
+                    for series, y in plot.items():
+                        yield str(od['order']), str(detector['name']), '%s_%s' % (group, series), \
+                              detector['wavelength'], values(y)
 
 
 class spectra_2d:
@@ -76,64 +113,141 @@ class spectra_2d:
         '''
 
         '''
-        --last modified on 4th, Feburary, 2026 to be compatible with the new ETC v117.2.0--
+        --last modified on 20th, November, 2026 for ETC v118.1.0 (etc_cli.py 2026-09, endpoint /api/Crires/)--
+        --previously: 4th, Feburary, 2026 for ETC v117.2.0--
         '''
 
         with open(self.path_input, 'r') as f:
             data = json.load(f)
-            # Modify the contents of the JSON file
-            for i in self.aperture_list:
 
-                data['seeing']['aperturepix']= float(i)
+        # v118: sky.airglowEnabled is mandatory (HTTP 500 without it). Off = v118 default = v117 behaviour.
+        if 'airglowEnabled' not in data.setdefault('sky', {}):
+            print('output_json: sky.airglowEnabled missing in %s -> set to False (ETC v118 default)' % self.path_input)
+            data['sky']['airglowEnabled'] = False
 
-                # Update the modified JSON file to disk
-                with open(self.path_input_modi, 'w') as f:
-                    json.dump(data, f)
+        # uploaded SED: star -> star_template (None = SED defined in the input JSON); planet -> model_name
+        upload = star_template if self.target == 'star' else self.model_name
 
-                subprocess.call(['mkdir', self.path_output+'ascii_%s/'%i])
+        # Modify the contents of the JSON file
+        for i in self.aperture_list:
 
-                if self.target == 'star':
+            data['seeing']['aperturepix']= float(i)
 
-                    if star_template==None:
+            # Update the modified JSON file to disk
+            with open(self.path_input_modi, 'w') as f:
+                json.dump(data, f)
 
-                        subprocess.call(['python', self.path_etc_local, 'CRIRES', self.path_input_modi, \
-                             '-o', self.path_output+'ascii_%s/'%i+'output_%s_%s_AO.json'%(self.date, i)])
+            subprocess.call(['mkdir', self.path_output+'ascii_%s/'%i])
 
-                    else:
+            out_file = self.etc_output_file(i)
+            cmd = [sys.executable, self.path_etc_local, 'CRIRES', self.path_input_modi, '-o', out_file]
+            if upload is not None:
+                cmd[4:4] = ['-u', upload]
+            ret = subprocess.call(cmd)
 
-                        subprocess.call(['python', self.path_etc_local, 'CRIRES', self.path_input_modi, \
-                         '-u' , star_template, '-o', self.path_output+'ascii_%s/'%i+'output_%s_%s_AO.json'%(self.date, i)])
+            # v118 etc_cli exits 1 and writes the ETC error JSON on failure: stop here instead of
+            # failing later in signal() with a missing converted_data file.
+            try:
+                with open(out_file) as f:
+                    res = json.load(f)
+            except (OSError, ValueError) as e:
+                raise RuntimeError('ETC call failed for aperture %s (exit %s): no valid output JSON (%s)' % (i, ret, e))
+            if ret != 0 or res.get('success') is False:
+                raise RuntimeError('ETC call failed for aperture %s (exit %s): %s' % (i, ret, res.get('error') or res.get('message')))
 
-
-                elif self.target == 'planet':
-                    subprocess.call(['python', self.path_etc_local, 'CRIRES', self.path_input_modi, \
-                         '-u' , self.model_name, '-o', self.path_output+'ascii_%s/'%i+'output_p_%s_%s_AO.json'%(self.date, i)])
+            # --- legacy (ETC v117) calls, kept for reference ---
+            # if self.target == 'star':
+            #     if star_template==None:
+            #         subprocess.call(['python', self.path_etc_local, 'CRIRES', self.path_input_modi, \
+            #              '-o', self.path_output+'ascii_%s/'%i+'output_%s_%s_AO.json'%(self.date, i)])
+            #     else:
+            #         subprocess.call(['python', self.path_etc_local, 'CRIRES', self.path_input_modi, \
+            #          '-u' , star_template, '-o', self.path_output+'ascii_%s/'%i+'output_%s_%s_AO.json'%(self.date, i)])
+            # elif self.target == 'planet':
+            #     subprocess.call(['python', self.path_etc_local, 'CRIRES', self.path_input_modi, \
+            #          '-u' , self.model_name, '-o', self.path_output+'ascii_%s/'%i+'output_p_%s_%s_AO.json'%(self.date, i)])
 
         print ('the ETC calculation is done, the output file is saved at %s'%self.path_output)
 
     #------------------
 
-    def json2ascii (self, path_json2ascii):
+    def etc_output_file(self, i):
+        '''Path of the ETC output JSON for aperture size i (same names as before).'''
+        tag = 'output_%s_%s_AO.json' if self.target == 'star' else 'output_p_%s_%s_AO.json'
+        return self.path_output + 'ascii_%s/' % i + tag % (self.date, i)
+
+    #------------------
+
+    def json2txt(self, output, order_number=None, n_skip=2):
+        '''
+        ETC v118: convert each aperture's ETC output JSON straight into the
+        converted_data_<order>_<group>_<series>_<det>.txt tables read by signal().
+        Replaces json2ascii() + ascii2txt(): no copy of ESO's etc_json2ascii.py, no .ascii files.
+
+        output: list of '<group>_<series>' keys (e.g. 'signals_obstarget') and/or 'psf'
+        order_number: default from __init__
+        n_skip: leading pixels dropped per detector. 2 reproduces the legacy ascii2txt (lines[2:]),
+                so every product keeps 2046 px/detector (= 6138 per order) as before.
+        '''
+        if order_number == None:
+            order_number = self.order_num
+
+        for i in self.aperture_list:
+
+            with open(self.etc_output_file(i)) as f:
+                table = {(o, d, k): (x, y) for o, d, k, x, y in iter_etc_series(json.load(f))}
+
+            missing = {}   # e.g. 'snr_noise_components': a per-detector dict in v118, not a plotted series
+            for j in [1, 2, 3]:
+                for x in order_number:
+                    for m in output:
+                        if (str(x), str(j), m) not in table:
+                            missing[m] = missing.get(m, 0) + 1
+                            continue
+                        xx, yy = table[(str(x), str(j), m)]
+
+                        with open(self.path_output + 'ascii_%s/' % i + 'converted_data_%s_%s_%s.txt' % (x, m, j), 'w') as f:
+                            # Write the header line
+                            if m == 'psf':
+                                f.write("angle (arcsec)\tPSF (norm)\n")
+                            elif m == 'snr_snr':
+                                f.write('wavelength (m)\tsnr\n')
+                            elif m == 'sed_target':
+                                f.write('wavelength (m)\tflux (Jsm-2m)\n')
+                            else:
+                                f.write("wavelength (m)\tcounts\n")
+                            # Write the data (str(float) as in ESO's converter -> identical text)
+                            skip = 0 if m == 'psf' else n_skip
+                            f.writelines('%s\t%s\n' % (a, b) for a, b in list(zip(xx, yy))[skip:])
+
+            print('txt_done aperture %s%s' % (i, ('; not in ETC output: ' + ', '.join('%s (%dx)' % kv for kv in missing.items()))
+                                               if missing else ''))
+
+    #------------------
+
+    def json2ascii (self, path_json2ascii=None):
 
         '''
         # This function works on converting the format froom json to ascii assoicated with a script provided by ETC page of CRIRES+
         # ATTENZIONE: NOT ALL OUTPUT DATA CAN BE SUCCESSFULLY CONVERTED
         # Please check carefully for the .ascii files and if you can, just use .json
+
+        DEPRECATED (ETC v118): no-op. json2txt() reads the ETC JSON directly; ESO's rewritten
+        etc_json2ascii.py uses different file names. Kept so older notebooks still run.
         '''
-        print ('Conversion from json to ascii starts')
+        print ('json2ascii: deprecated since ETC v118, nothing done -> use json2txt(output)')
 
-        if self.target == "star":
-
-            for i in self.aperture_list:
-                subprocess.call(['cp', '-r', path_json2ascii, self.path_output+'ascii_%s/'%i])
-                subprocess.call(['python', self.path_output+'ascii_%s/'%i+'etc_json2ascii.py',\
-                                 self.path_output+'ascii_%s/'%i+'output_%s_%s_AO.json'%(self.date, i)])
-
-        if self.target == 'planet':
-            for i in self.aperture_list:
-                subprocess.call(['cp', '-r', path_json2ascii, self.path_output+'ascii_%s/'%i])
-                subprocess.call(['python', self.path_output+'ascii_%s/'%i+'etc_json2ascii.py',\
-                                 self.path_output+'ascii_%s/'%i+'output_p_%s_%s_AO.json'%(self.date, i)])
+        # --- legacy (ETC v117): copy etc_json2ascii.py into every ascii_i/ and run it there ---
+        # if self.target == "star":
+        #     for i in self.aperture_list:
+        #         subprocess.call(['cp', '-r', path_json2ascii, self.path_output+'ascii_%s/'%i])
+        #         subprocess.call(['python', self.path_output+'ascii_%s/'%i+'etc_json2ascii.py',\
+        #                          self.path_output+'ascii_%s/'%i+'output_%s_%s_AO.json'%(self.date, i)])
+        # if self.target == 'planet':
+        #     for i in self.aperture_list:
+        #         subprocess.call(['cp', '-r', path_json2ascii, self.path_output+'ascii_%s/'%i])
+        #         subprocess.call(['python', self.path_output+'ascii_%s/'%i+'etc_json2ascii.py',\
+        #                          self.path_output+'ascii_%s/'%i+'output_p_%s_%s_AO.json'%(self.date, i)])
 
     #------------------
 
@@ -143,49 +257,45 @@ class spectra_2d:
         # This functions works on converting .ascii files into .txt files
         # Order_number: the order numbers of the detector. The defalut setting follows the number from __init__
 
+        DEPRECATED (ETC v118): forwards to json2txt(), which writes the same converted_data_*.txt
+        files straight from the ETC JSON (also reads v117 JSONs).
         '''
+        print ('ascii2txt: deprecated since ETC v118 -> json2txt(output)')
+        return self.json2txt(output, order_number=order_number)
 
-        if order_number == None:
-            order_number=self.order_num
-
-        for i in self.aperture_list:
-
-            for j in [1,2,3]:
-                for x in order_number:
-                    for m in output:
-                        try:
-                            if self.target == 'star':
-                                file=self.path_output+'ascii_%s/'%i+\
-                                'output_%s_%s_AO.json_order:%s_det:%s_%s.ascii'%(self.date, i, x, j, m)
-                            elif self.target =='planet':
-                                file=self.path_output+'ascii_%s/'%i+\
-                                'output_p_%s_%s_AO.json_order:%s_det:%s_%s.ascii'%(self.date, i, x, j, m)
-                            dat=[]
-                            with open(file, 'r') as f:
-                                lines = f.readlines()
-                                dat += [line.split() for line in lines[2:]]
-
-
-                            with open(self.path_output+'ascii_%s/'%i+'converted_data_%s_%s_%s.txt'%(x,m,j), 'w') as f:
-                                # Write the header line
-                                if m == 'psf':
-                                    f.write("angle (arcsec)\tPSF (norm)\n")
-                                elif m == 'snr_snr':
-                                    f.write('wavelength (m)\tsnr\n')
-                                elif m == 'sed_target':
-                                    f.write('wavelength (m)\tflux (Jsm-2m)\n')
-                                else:
-                                    f.write("wavelength (m)\tcounts\n")
-                                # Write the data
-                                for line in dat:
-                                    f.write("\t".join(line) + "\n")
-
-
-                        except FileNotFoundError:
-                            print('File Not Found: %s-%s-%s-%s'%(i,x,j,m))
-                            continue
-
-                    print('txt_done_%s_%s_%s'%(i,x,j))
+        # --- legacy (ETC v117): parse the .ascii files written by etc_json2ascii.py ---
+        # if order_number == None:
+        #     order_number=self.order_num
+        # for i in self.aperture_list:
+        #     for j in [1,2,3]:
+        #         for x in order_number:
+        #             for m in output:
+        #                 try:
+        #                     if self.target == 'star':
+        #                         file=self.path_output+'ascii_%s/'%i+\
+        #                         'output_%s_%s_AO.json_order:%s_det:%s_%s.ascii'%(self.date, i, x, j, m)
+        #                     elif self.target =='planet':
+        #                         file=self.path_output+'ascii_%s/'%i+\
+        #                         'output_p_%s_%s_AO.json_order:%s_det:%s_%s.ascii'%(self.date, i, x, j, m)
+        #                     dat=[]
+        #                     with open(file, 'r') as f:
+        #                         lines = f.readlines()
+        #                         dat += [line.split() for line in lines[2:]]   # NB drops 2 data px (no header)
+        #                     with open(self.path_output+'ascii_%s/'%i+'converted_data_%s_%s_%s.txt'%(x,m,j), 'w') as f:
+        #                         if m == 'psf':
+        #                             f.write("angle (arcsec)\tPSF (norm)\n")
+        #                         elif m == 'snr_snr':
+        #                             f.write('wavelength (m)\tsnr\n')
+        #                         elif m == 'sed_target':
+        #                             f.write('wavelength (m)\tflux (Jsm-2m)\n')
+        #                         else:
+        #                             f.write("wavelength (m)\tcounts\n")
+        #                         for line in dat:
+        #                             f.write("\t".join(line) + "\n")
+        #                 except FileNotFoundError:
+        #                     print('File Not Found: %s-%s-%s-%s'%(i,x,j,m))
+        #                     continue
+        #             print('txt_done_%s_%s_%s'%(i,x,j))
 
     #------------------
 
@@ -384,7 +494,9 @@ class spectra_2d:
             ff.axis('off')
             '''
             if "plot_combination" == True:
-                ff.hlines(y=1024+self.planet_p, xmin=0, xmax=self.focal_plane.shape[1], ls='--',colors='gray', linewidth=0.8)
+                # (dead code) frame centre instead of the hard-coded 1024 of the full 2048-row plane
+                ff.hlines(y=central_pix+self.planet_p, xmin=0, xmax=self.focal_plane.shape[1], ls='--',colors='gray', linewidth=0.8)
+                #ff.hlines(y=1024+self.planet_p, xmin=0, xmax=self.focal_plane.shape[1], ls='--',colors='gray', linewidth=0.8)
             '''
         plt.subplots_adjust(hspace=1)
         plt.ylim(loc_be-1,loc_up+1)
@@ -468,6 +580,21 @@ class spectra_2d:
 
     #------------------
 
+    def nodding_positions(self, nod_throw=5.0, pixel_scale=0.059, reduced_focal_plane=True, reduced_height=300,
+                          plane=(2048, 2048*3)):
+        '''
+        Star rows of the A/B nods on the frame that combine() builds with the SAME
+        reduced_focal_plane / reduced_height / plane arguments.
+        nod_throw [arcsec] / pixel_scale [arcsec/px]; nods at centre -/+ int(nod_throw/pixel_scale).
+        Default (300-row frame): {'A': 66, 'B': 234}; full 2048-row plane: {'A': 940, 'B': 1108}.
+        '''
+        height = int(reduced_height) if reduced_focal_plane else int(plane[0])
+        centre = int(np.ceil(height / 2))          # same centre convention as combine()
+        offset = int(nod_throw / pixel_scale)
+        return {'A': centre - offset, 'B': centre + offset}
+
+    #------------------
+
     def combine(self, data_star, data_p,\
                 data_disk=None, disk_structure=None, disk_separation=None, \
                 plot_combination=None, d=None, star_posi=None, sky='Uniform', noise=True, data_sky=None,\
@@ -528,6 +655,12 @@ class spectra_2d:
 
         else :
             central_pix = star_posi
+
+        # nods placed for the full 2048-row plane (e.g. 1024+/-84) do not fit the reduced frame
+        if not (0 <= central_pix < plane[0] and 0 <= central_pix + d < plane[0]):
+            raise ValueError('star row %s / planet row %s outside the %s-row frame: take star_posi from '
+                             'nodding_positions() with the same reduced_focal_plane/reduced_height'
+                             % (central_pix, central_pix + d, plane[0]))
 
 
         row=len(self.order_num)

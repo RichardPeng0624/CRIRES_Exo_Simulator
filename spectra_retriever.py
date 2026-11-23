@@ -9,7 +9,7 @@ The likelihood machinery is unchanged.  The published EXOCRIRES detectability
 runs (``EXOCRIRES_likelihood_fast.ipynb``) took a *fixed grid* of pre-computed
 theoretical planet spectra (``wispit_1b_spectra.npz`` and the ``upload_*.dat``
 templates derived from it), pushed them through
-:mod:`exocrires.input_spectra_preparation`, separated them into star/planet
+:mod:`exocrires.spectra_preparer`, separated them into star/planet
 components with :class:`~exocrires.spectra_processor.Spectra_fitting`, and
 handed the resulting model matrix to
 :meth:`~exocrires.spectra_processor.processor_likelihood_map.fast_likelihood_map`.
@@ -29,7 +29,7 @@ parameters and can be sampled with MultiNest::
       v
     rest-frame emission spectrum
       |
-      |  input_spectra_preparation.Spectra_Preparator   <- SAME module as before
+      |  spectra_preparer.Spectra_Preparator   <- SAME module as before
       |    limb darkening -> rotational broadening -> instrument LSF -> RV shift
       v
     detector-sampled planet template
@@ -229,7 +229,7 @@ if not hasattr(np, 'trapz'):            # pragma: no cover - numpy-version depen
     np.trapz = np.trapezoid
 
 from exocrires import info
-from exocrires import input_spectra_preparation
+from exocrires import spectra_preparer
 from exocrires.spectra_processor import Spectra_fitting, processor_likelihood_map
 
 
@@ -469,7 +469,7 @@ class pRT_ForwardModel:
     This is the guidebook's ``pRT_spectrum`` reduced to what EXOCRIRES needs:
     P-T profile, chemistry, radiative transfer.  Everything downstream of the
     rest-frame spectrum (broadening, RV, detector sampling) is deliberately
-    *not* here - that belongs to :mod:`exocrires.input_spectra_preparation`,
+    *not* here - that belongs to :mod:`exocrires.spectra_preparer`,
     which :class:`SpectraRetriever` drives, so that the model spectrum and the
     original theoretical templates travel through byte-identical code.
 
@@ -667,7 +667,7 @@ class pRT_ForwardModel:
         -------
         wl : ndarray
             Wavelength in **metres** (the unit
-            :mod:`exocrires.input_spectra_preparation` expects).
+            :mod:`exocrires.spectra_preparer` expects).
         flux : ndarray
             Flux in W m^-2 um^-1, converted from pRT3's native
             erg s^-1 cm^-2 cm^-1.  The absolute scale is irrelevant to the
@@ -760,7 +760,7 @@ class SpectraRetriever:
         Number of pressure layers, log-spaced over ``pressure_range``.
     prep_T, prep_G, prep_Z : float
         Temperature, log g and metallicity identifying the synthetic spectrum
-        :class:`input_spectra_preparation.Spectra_Preparator` builds the
+        :class:`spectra_preparer.Spectra_Preparator` builds the
         transmission from.  **Required** - they describe the system, not the
         method, so there is no sensible default here.
     spectra_input_folder : str
@@ -892,7 +892,7 @@ class SpectraRetriever:
         self.species = [PRT3_SPECIES_OVERRIDES.get(s, s) for s in species]
 
         self.ld_coeff = ld_coeff
-        self.prep = input_spectra_preparation.Spectra_Preparator(
+        self.prep = spectra_preparer.Spectra_Preparator(
             folder_name=spectra_input_folder, T=prep_T, G=prep_G, Z=prep_Z,
             path=path_root)
 
